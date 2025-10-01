@@ -1,0 +1,144 @@
+# AGSAC默认配置文件
+# 包含所有模块的默认超参数设置
+
+# 模型配置
+model:
+  # 输入维度配置
+  max_pedestrians: 10          # 最大行人数量
+  max_corridors: 10            # 最大通路数量
+  trajectory_length: 8         # 轨迹长度
+  prediction_horizon: 12       # 预测时间步长
+  
+  # 网络架构配置
+  hidden_dim: 256              # 隐藏层维度
+  lstm_layers: 1               # LSTM层数
+  attention_heads: 8           # 注意力头数
+  dropout: 0.1                 # Dropout率
+  
+  # 编码器配置
+  pedestrian_encoder:
+    input_dim: 2               # 行人位置维度 (x, y)
+    hidden_dim: 128
+    num_layers: 2
+    
+  corridor_encoder:
+    pointnet_hidden: [64, 128, 256]  # PointNet隐藏层
+    attention_dim: 128
+    
+  dog_state_encoder:
+    state_dim: 6               # 机器狗状态维度
+    hidden_dim: 128
+    num_layers: 2
+    
+  # 预测器配置
+  e_v2_net:
+    encoder_hidden: 256
+    decoder_hidden: 256
+    num_layers: 2
+    
+  # SAC配置
+  sac:
+    actor_hidden: [256, 256]
+    critic_hidden: [256, 256]
+    action_dim: 2              # 动作维度 (linear_vel, angular_vel)
+    log_std_min: -20
+    log_std_max: 2
+    
+  # 评估器配置
+  geometric_evaluator:
+    collision_threshold: 0.5   # 碰撞检测阈值
+    comfort_zone: 1.0          # 舒适区域半径
+
+# 训练配置
+training:
+  # 基础训练参数
+  batch_size: 256
+  learning_rate: 0.0001
+  gamma: 0.99                  # 折扣因子
+  tau: 0.005                   # 软更新参数
+  
+  # SAC特定参数
+  lr_actor: 0.0001
+  lr_critic: 0.0001
+  lr_alpha: 0.0001
+  alpha: 0.2                   # 熵系数
+  target_entropy: -2.0         # 目标熵
+  
+  # 训练控制
+  max_epochs: 1000
+  save_interval: 100
+  eval_interval: 50
+  log_interval: 10
+  
+  # 预训练配置
+  pretrain_epochs: 600
+  pretrain_lr: 0.001
+  pretrain_batch_size: 128
+
+# 环境配置
+environment:
+  # 仿真参数
+  max_steps: 500               # 最大步数
+  time_step: 0.1               # 时间步长
+  collision_distance: 0.5      # 碰撞检测距离
+  
+  # 奖励函数参数
+  reward_weights:
+    goal_reward: 10.0          # 到达目标奖励
+    collision_penalty: -50.0   # 碰撞惩罚
+    time_penalty: -0.1         # 时间惩罚
+    comfort_reward: 1.0        # 舒适区域奖励
+    
+  # 观测空间
+  observation:
+    pedestrian_range: 10.0     # 行人检测范围
+    corridor_range: 15.0       # 通路检测范围
+    lidar_rays: 360            # 激光雷达射线数
+    lidar_range: 20.0          # 激光雷达范围
+
+# 数据配置
+data:
+  # 数据集路径
+  trajectory_datasets:
+    eth: "data/trajectories/eth"
+    ucy: "data/trajectories/ucy"
+    
+  # 数据预处理
+  preprocessing:
+    normalize: true
+    augment: true
+    noise_std: 0.01
+    
+  # 数据加载
+  num_workers: 4
+  pin_memory: true
+
+# 日志配置
+logging:
+  # 日志级别
+  level: "INFO"
+  
+  # 输出配置
+  log_dir: "logs"
+  tensorboard_dir: "logs/tensorboard"
+  checkpoint_dir: "logs/checkpoints"
+  
+  # 日志内容
+  log_gradients: false
+  log_weights: false
+  log_attention: true
+
+# 设备配置
+device:
+  use_cuda: true
+  device_id: 0
+  mixed_precision: false
+
+# 随机种子
+seed: 42
+
+# 实验配置
+experiment:
+  name: "agsac_experiment"
+  tags: ["navigation", "attention", "sac"]
+  notes: "AGSAC机器狗导航实验"

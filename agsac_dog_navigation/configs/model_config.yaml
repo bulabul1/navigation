@@ -1,0 +1,200 @@
+# AGSAC模型架构配置文件
+# 定义各个组件的详细架构参数
+
+# 模型整体配置
+model:
+  name: "AGSAC"
+  version: "1.0"
+  
+  # 输入配置
+  input_config:
+    max_pedestrians: 10
+    max_corridors: 10
+    trajectory_length: 8
+    prediction_horizon: 12
+    dog_state_dim: 6
+    action_dim: 2
+
+# 编码器配置
+encoders:
+  # 行人轨迹编码器
+  pedestrian_encoder:
+    type: "PedestrianEncoder"
+    config:
+      input_dim: 2  # (x, y)
+      hidden_dim: 128
+      num_layers: 2
+      dropout: 0.1
+      bidirectional: true
+      attention_heads: 4
+      
+  # 通路几何编码器
+  corridor_encoder:
+    type: "CorridorEncoder"
+    config:
+      pointnet:
+        input_dim: 2  # (x, y)
+        hidden_dims: [64, 128, 256]
+        output_dim: 256
+        dropout: 0.1
+        
+      attention:
+        hidden_dim: 128
+        num_heads: 8
+        dropout: 0.1
+        
+  # 机器狗状态编码器
+  dog_state_encoder:
+    type: "DogStateEncoder"
+    config:
+      input_dim: 6  # (x, y, theta, vx, vy, omega)
+      hidden_dim: 128
+      num_layers: 2
+      dropout: 0.1
+      use_lstm: true
+      
+  # PointNet实现
+  pointnet:
+    type: "PointNet"
+    config:
+      input_dim: 2
+      hidden_dims: [64, 128, 256]
+      output_dim: 256
+      dropout: 0.1
+      use_tnet: true
+      
+  # SocialCircle社会交互
+  social_circle:
+    type: "SocialCircle"
+    config:
+      radius: 2.0
+      num_circles: 5
+      feature_dim: 64
+      hidden_dim: 128
+
+# 预测器配置
+predictors:
+  # E-V2-Net骨干网络
+  e_v2_net:
+    type: "EV2Net"
+    config:
+      encoder:
+        input_dim: 256
+        hidden_dim: 256
+        num_layers: 2
+        dropout: 0.1
+        
+      decoder:
+        hidden_dim: 256
+        output_dim: 2  # (x, y)
+        num_layers: 2
+        dropout: 0.1
+        
+      prediction_horizon: 12
+      
+  # 轨迹预测包装器
+  trajectory_predictor:
+    type: "TrajectoryPredictor"
+    config:
+      backbone: "e_v2_net"
+      num_modes: 5  # 多模态预测
+      temperature: 1.0
+
+# 融合模块配置
+fusion:
+  # 多模态注意力融合
+  multi_modal_fusion:
+    type: "MultiModalFusion"
+    config:
+      input_dims:
+        pedestrian: 128
+        corridor: 256
+        dog_state: 128
+        
+      hidden_dim: 256
+      num_heads: 8
+      num_layers: 2
+      dropout: 0.1
+      
+      fusion_type: "attention"  # "attention", "concat", "add"
+
+# SAC组件配置
+sac:
+  # Actor网络
+  actor:
+    type: "HybridActor"
+    config:
+      input_dim: 256  # 融合特征维度
+      hidden_dims: [256, 256]
+      action_dim: 2
+      log_std_min: -20
+      log_std_max: 2
+      use_lstm: true
+      lstm_hidden: 128
+      lstm_layers: 1
+      
+  # Critic网络
+  critic:
+    type: "HybridCritic"
+    config:
+      input_dim: 256 + 2  # 状态 + 动作
+      hidden_dims: [256, 256]
+      use_lstm: true
+      lstm_hidden: 128
+      lstm_layers: 1
+      
+  # SAC Agent配置
+  agent:
+    type: "SACAgent"
+    config:
+      gamma: 0.99
+      tau: 0.005
+      alpha: 0.2
+      lr_actor: 0.0001
+      lr_critic: 0.0001
+      lr_alpha: 0.0001
+      target_entropy: -2.0
+
+# 评估器配置
+evaluator:
+  # 几何微分评估器
+  geometric_evaluator:
+    type: "GeometricDifferentialEvaluator"
+    config:
+      collision_threshold: 0.5
+      comfort_zone: 1.0
+      safety_margin: 0.2
+      
+      # 几何约束
+      constraints:
+        max_curvature: 1.0
+        max_acceleration: 2.0
+        min_turning_radius: 0.5
+        
+      # 评估权重
+      weights:
+        collision: 1.0
+        comfort: 0.5
+        smoothness: 0.3
+        efficiency: 0.2
+
+# 完整Agent配置
+agent:
+  type: "AGSACAgent"
+  config:
+    # 组件配置
+    encoders: "encoders"
+    predictors: "predictors"
+    fusion: "fusion"
+    sac: "sac"
+    evaluator: "evaluator"
+    
+    # 推理配置
+    inference:
+      use_teacher_forcing: false
+      temperature: 1.0
+      num_samples: 1
+      
+    # 设备配置
+    device: "cuda"
+    mixed_precision: false

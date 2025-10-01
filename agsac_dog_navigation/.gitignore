@@ -1,0 +1,311 @@
+# 训练产物
+logs/
+outputs/
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.pkl
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# pdm
+.pdm.toml
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.tmp
+*.temp
+*.bak
+*.swp
+*~.nib
+local.properties
+.settings/
+.loadpath
+.recommenders
+.target/
+.metadata
+.factorypath
+.buildpath
+.classpath
+.project
+.externalToolBuilders/
+*.launch
+.pydevproject
+.cproject
+.autotools
+.factorypath
+.buildpath
+.target/
+.tern-project
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.code-workspace
+.history/
+.ionide/
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# 数据文件（可选，根据需要调整）
+data/trajectories/*
+!data/trajectories/README.md
+data/raw/*
+data/processed/*
+data/external/*
+
+# 模型检查点
+checkpoints/
+models/
+weights/
+
+# 实验结果
+experiments/
+results/
+runs/
+
+# 临时文件
+tmp/
+temp/
+*.tmp
+*.temp
+
+# 日志文件
+*.log
+logs/
+wandb/
+
+# 配置文件中的敏感信息
+configs/*_secret.yaml
+configs/*_private.yaml
+.env.local
+.env.production
+
+# 文档构建产物
+docs/_build/
+docs/build/
+
+# 机器学习/深度学习特定文件
+*.onnx
+*.tflite
+*.pb
+*.tflite
+*.mlmodel
+*.hdf5
+*.h5
+*.npz
+*.npy
+*.joblib
+
+# 强化学习特定
+*.monitor.csv
+*.progress.csv
+*.episode_batch
+*.rollout
+
+# 数据集和标注文件
+*.json
+*.jsonl
+*.csv
+*.tsv
+*.parquet
+*.feather
+*.arrow
+*.hdf5
+*.h5
+*.mat
+*.npy
+*.npz
+*.pickle
+*.pkl
+
+# 模型权重和检查点（补充）
+*.bin
+*.safetensors
+*.weights
+*.state_dict
+*.model
+*.best
+*.latest
+
+# 实验跟踪和监控
+mlruns/
+.mlflow/
+neptune/
+comet_ml/
+optuna/
+ray_results/
+ray_tune/
+hyperopt/
+
+# 数据版本控制
+.dvc/
+.dvcignore
+*.dvc
+
+# 容器化相关
+Dockerfile.dev
+docker-compose.override.yml
+.dockerignore
+
+# 其他
+*.orig
+*.rej

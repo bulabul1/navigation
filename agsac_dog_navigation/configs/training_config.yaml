@@ -1,0 +1,116 @@
+# AGSAC训练配置文件
+# 继承默认配置并覆盖训练相关参数
+
+# 继承默认配置
+defaults:
+  - default_config.yaml
+
+# 训练特定配置
+training:
+  # 训练模式
+  mode: "full"  # "pretrain", "finetune", "full"
+  
+  # 批次和优化器
+  batch_size: 128
+  learning_rate: 0.0003
+  weight_decay: 1e-4
+  
+  # 学习率调度
+  lr_scheduler:
+    type: "cosine"  # "step", "cosine", "plateau"
+    step_size: 200
+    gamma: 0.5
+    T_max: 1000
+    eta_min: 1e-6
+  
+  # 梯度裁剪
+  grad_clip_norm: 1.0
+  
+  # 早停
+  early_stopping:
+    patience: 100
+    min_delta: 0.001
+    
+  # 验证配置
+  validation:
+    split: 0.2
+    metrics: ["mse", "mae", "ade", "fde"]
+    
+  # 检查点配置
+  checkpoint:
+    save_best: true
+    save_last: true
+    monitor: "val_loss"
+    mode: "min"
+
+# 预训练配置
+pretrain:
+  # 轨迹预测预训练
+  trajectory_prediction:
+    enabled: true
+    epochs: 600
+    batch_size: 64
+    learning_rate: 0.001
+    dataset: "eth"
+    
+  # 编码器预训练
+  encoders:
+    enabled: false
+    epochs: 200
+    batch_size: 128
+    learning_rate: 0.0005
+
+# 强化学习训练
+rl_training:
+  # 经验回放
+  replay_buffer:
+    size: 1000000
+    batch_size: 256
+    
+  # 探索策略
+  exploration:
+    type: "epsilon_greedy"  # "epsilon_greedy", "noise"
+    epsilon_start: 1.0
+    epsilon_end: 0.01
+    epsilon_decay: 0.995
+    
+  # 目标网络更新
+  target_update:
+    frequency: 1
+    tau: 0.005
+    
+  # 训练频率
+  train_frequency: 1
+  gradient_steps: 1
+
+# 评估配置
+evaluation:
+  # 评估频率
+  eval_frequency: 50
+  num_eval_episodes: 10
+  
+  # 评估指标
+  metrics:
+    - "success_rate"
+    - "collision_rate"
+    - "path_length"
+    - "time_to_goal"
+    - "comfort_score"
+    
+  # 可视化
+  visualize: true
+  save_videos: true
+  video_fps: 10
+
+# 实验配置
+experiment:
+  name: "agsac_training_run"
+  description: "AGSAC完整训练流程"
+  tags: ["training", "navigation", "attention"]
+  
+  # 输出目录
+  output_dir: "outputs/experiments"
+  
+  # 版本控制
+  version: "v1.0"
+  git_commit: true
