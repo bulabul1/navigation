@@ -214,7 +214,6 @@ data/external/*
 
 # 模型检查点
 checkpoints/
-models/
 weights/
 
 # 实验结果
