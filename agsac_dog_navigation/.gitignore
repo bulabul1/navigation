@@ -308,3 +308,13 @@ docker-compose.override.yml
 # 其他
 *.orig
 *.rej
+
+# External/第三方代码（SocialCircle等）
+external/SocialCircle_original/
+external/*/
+
+# 预训练模型权重
+pretrained/social_circle/*.pth
+pretrained/social_circle/*.pt
+pretrained/e_v2_net/*.pth
+pretrained/e_v2_net/*.pt
