@@ -20,6 +20,13 @@ from typing import Dict, Optional, List, Tuple
 from pathlib import Path
 from collections import deque
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_AVAILABLE = True
+except ImportError:
+    TENSORBOARD_AVAILABLE = False
+    print("[Warning] TensorBoard not available. Install with: pip install tensorboard")
+
 from ..models import AGSACModel
 from ..envs import AGSACEnvironment
 from .replay_buffer import SequenceReplayBuffer
@@ -55,7 +62,8 @@ class AGSACTrainer:
         max_episodes: int = 1000,
         device: str = 'cpu',
         save_dir: str = './outputs',
-        experiment_name: str = 'agsac_experiment'
+        experiment_name: str = 'agsac_experiment',
+        use_tensorboard: bool = True
     ):
         """
         Args:
@@ -123,12 +131,21 @@ class AGSACTrainer:
         # 最佳模型追踪
         self.best_eval_return = -float('inf')
         
+        # TensorBoard
+        self.use_tensorboard = use_tensorboard and TENSORBOARD_AVAILABLE
+        self.writer = None
+        if self.use_tensorboard:
+            tensorboard_dir = self.save_dir / 'tensorboard'
+            self.writer = SummaryWriter(log_dir=str(tensorboard_dir))
+            print(f"[Trainer] TensorBoard日志: {tensorboard_dir}")
+        
         print(f"[Trainer] 初始化完成")
         print(f"  - 实验名称: {experiment_name}")
         print(f"  - 保存目录: {self.save_dir}")
         print(f"  - Buffer容量: {buffer_capacity}")
         print(f"  - 序列长度: {seq_len}")
         print(f"  - Batch大小: {batch_size}")
+        print(f"  - TensorBoard: {'启用' if self.use_tensorboard else '禁用'}")
     
     def collect_episode(self, deterministic: bool = False) -> Dict:
         """
@@ -368,6 +385,11 @@ class AGSACTrainer:
         self.save_checkpoint(is_best=False, suffix='final')
         self.save_training_history()
         
+        # 关闭TensorBoard
+        if self.use_tensorboard and self.writer is not None:
+            self.writer.close()
+            print("[TensorBoard] 日志已保存并关闭")
+        
         print(f"\n{'='*60}")
         print(f"训练完成!")
         print(f"  总时间: {total_time/60:.2f} 分钟")
@@ -495,6 +517,19 @@ class AGSACTrainer:
         log_str += f" | Time={episode_time:.2f}s"
         
         print(log_str)
+        
+        # TensorBoard记录
+        if self.use_tensorboard and self.writer is not None:
+            self.writer.add_scalar('train/episode_return', episode_return, episode)
+            self.writer.add_scalar('train/episode_length', episode_length, episode)
+            self.writer.add_scalar('train/buffer_size', len(self.buffer), episode)
+            
+            if train_losses:
+                self.writer.add_scalar('train/actor_loss', train_losses['actor_loss'], episode)
+                self.writer.add_scalar('train/critic_loss', train_losses['critic_loss'], episode)
+                self.writer.add_scalar('train/alpha', train_losses['alpha'], episode)
+            
+            self.writer.add_scalar('train/episode_time', episode_time, episode)
     
     def _log_evaluation(self, episode: int, eval_stats: Dict):
         """记录评估日志"""
@@ -503,6 +538,12 @@ class AGSACTrainer:
         print(f"  Mean Return: {eval_stats['eval_return_mean']:.2f} ± {eval_stats['eval_return_std']:.2f}")
         print(f"  Mean Length: {eval_stats['eval_length_mean']:.1f}")
         print(f"{'='*60}\n")
+        
+        # TensorBoard记录
+        if self.use_tensorboard and self.writer is not None:
+            self.writer.add_scalar('eval/mean_return', eval_stats['eval_return_mean'], episode)
+            self.writer.add_scalar('eval/std_return', eval_stats['eval_return_std'], episode)
+            self.writer.add_scalar('eval/mean_length', eval_stats['eval_length_mean'], episode)
     
     def save_checkpoint(self, is_best: bool = False, suffix: str = ''):
         """

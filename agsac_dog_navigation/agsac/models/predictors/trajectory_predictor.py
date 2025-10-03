@@ -223,7 +223,8 @@ class PretrainedTrajectoryPredictor(TrajectoryPredictorInterface):
     ):
         super().__init__()
         
-        self.weights_path = Path(weights_path)
+        # 转换为绝对路径
+        self.weights_path = Path(weights_path).absolute()
         self.freeze = freeze
         
         # 尝试加载预训练模型
@@ -463,7 +464,7 @@ class PretrainedTrajectoryPredictor(TrajectoryPredictorInterface):
 
 
 def create_trajectory_predictor(
-    predictor_type: str = 'simple',
+    predictor_type: str = 'pretrained',
     **kwargs
 ) -> TrajectoryPredictorInterface:
     """
@@ -471,17 +472,18 @@ def create_trajectory_predictor(
     
     Args:
         predictor_type: 预测器类型
-            - 'simple': 简化实现
-            - 'pretrained': 加载预训练模型
+            - 'pretrained': 加载预训练模型（默认且推荐）
+            - 'simple': 简化实现（已弃用，不推荐使用）
         **kwargs: 其他参数
     
     Returns:
         predictor: 轨迹预测器
     """
-    if predictor_type == 'simple':
-        return SimpleTrajectoryPredictor(**kwargs)
-    elif predictor_type == 'pretrained':
+    if predictor_type == 'pretrained':
         return PretrainedTrajectoryPredictor(**kwargs)
+    elif predictor_type == 'simple':
+        print("[WARNING] 简化版预测器已弃用，请使用预训练模型！")
+        return SimpleTrajectoryPredictor(**kwargs)
     else:
         raise ValueError(f"Unknown predictor type: {predictor_type}")
 

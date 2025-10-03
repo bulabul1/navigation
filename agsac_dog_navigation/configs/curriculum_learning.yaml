@@ -1,0 +1,50 @@
+# 课程学习配置
+# 用于完整训练，从easy到hard逐步增加难度
+
+mode: curriculum
+device: cuda
+seed: null  # 不固定种子，增加多样性
+
+env:
+  max_pedestrians: 10
+  max_corridors: 10
+  max_vertices: 20
+  obs_horizon: 8
+  pred_horizon: 12
+  max_episode_steps: 200  # 更长的episode用于复杂场景
+  use_geometric_reward: true
+  use_corridor_generator: true
+  curriculum_learning: true
+  scenario_seed: null
+  device: cuda
+
+model:
+  action_dim: 22
+  hidden_dim: 128
+  max_pedestrians: 10
+  max_corridors: 10
+  max_vertices: 20
+  obs_horizon: 8
+  pred_horizon: 12
+  use_pretrained_predictor: false
+  pretrained_weights_path: null
+  device: cuda
+
+training:
+  episodes: 300
+  warmup_episodes: 30
+  updates_per_episode: 10
+  buffer_capacity: 10000  # 更大的buffer
+  seq_len: 16
+  batch_size: 16
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  gamma: 0.99
+  tau: 0.005
+  alpha: 0.2
+  log_interval: 10
+  save_interval: 50
+  eval_interval: 50
+  use_tensorboard: true
+  experiment_name: curriculum_learning_training
+

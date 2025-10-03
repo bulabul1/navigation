@@ -176,23 +176,22 @@ class AGSACModel(nn.Module):
         
         # ==================== 2. 预测层 ====================
         
-        # 根据配置选择预测器类型
-        if use_pretrained_predictor and pretrained_weights_path:
-            print(f"[INFO] 使用预训练轨迹预测器: {pretrained_weights_path}")
-            self.trajectory_predictor = create_trajectory_predictor(
-                predictor_type='pretrained',
-                weights_path=pretrained_weights_path,
-                freeze=True,
-                fallback_to_simple=True
+        # 强制使用预训练模型
+        if not use_pretrained_predictor or not pretrained_weights_path:
+            raise ValueError(
+                "必须使用预训练轨迹预测器！\n"
+                "请在配置文件中设置:\n"
+                "  use_pretrained_predictor: true\n"
+                "  pretrained_weights_path: 'external/SocialCircle_original/weights/SocialCircle/evsczara1'"
             )
-        else:
-            print(f"[INFO] 使用简化轨迹预测器")
-            self.trajectory_predictor = create_trajectory_predictor(
-                predictor_type='simple',
-                social_circle_dim=social_feature_dim,
-                prediction_horizon=pred_horizon,
-                num_modes=num_modes
-            )
+        
+        print(f"[INFO] 使用预训练轨迹预测器: {pretrained_weights_path}")
+        self.trajectory_predictor = create_trajectory_predictor(
+            predictor_type='pretrained',
+            weights_path=pretrained_weights_path,
+            freeze=True,
+            fallback_to_simple=False  # 不允许回退到简化版
+        )
         
         # ==================== 3. 行人编码层 ====================
         

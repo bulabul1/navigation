@@ -1,0 +1,50 @@
+# 快速测试配置 - 验证完整流程（课程学习模式）
+
+mode: curriculum
+device: cuda  # 自动检测
+seed: 42
+
+env:
+  max_pedestrians: 10
+  max_corridors: 10
+  max_vertices: 20
+  obs_horizon: 8
+  pred_horizon: 12
+  max_episode_steps: 200
+  use_geometric_reward: true
+  use_corridor_generator: true
+  curriculum_learning: true
+  scenario_seed: null
+  device: cuda
+
+model:
+  action_dim: 22
+  hidden_dim: 128
+  num_modes: 3  # 每个行人预测3条轨迹
+  max_pedestrians: 10
+  max_corridors: 10
+  max_vertices: 20
+  obs_horizon: 8
+  pred_horizon: 12
+  use_pretrained_predictor: true
+  pretrained_weights_path: "external/SocialCircle_original/weights/SocialCircle/evsczara1"
+  device: cuda
+
+training:
+  episodes: 10  # 只运行10个episodes快速测试
+  warmup_episodes: 5
+  updates_per_episode: 5
+  buffer_capacity: 1000
+  seq_len: 16
+  batch_size: 8
+  actor_lr: 0.0003
+  critic_lr: 0.0003
+  gamma: 0.99
+  tau: 0.005
+  alpha: 0.2
+  log_interval: 5
+  save_interval: 10
+  eval_interval: 10
+  use_tensorboard: true
+  experiment_name: quick_test
+

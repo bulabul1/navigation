@@ -1,197 +1,180 @@
 #!/usr/bin/env python3
 """
-AGSAC训练主脚本
+AGSAC训练脚本（基于配置文件）
 
-使用方法:
-    python scripts/train.py --config configs/training_config.yaml
-    python scripts/train.py --config configs/training_config.yaml --pretrained pretrained/e_v2_net/e_v2_net_weights.pth
+使用方法：
+    python scripts/train.py --config configs/fixed_scene.yaml
+    python scripts/train.py --config configs/curriculum_learning.yaml
+    python scripts/train.py --config configs/dynamic_scenes.yaml
+    python scripts/train.py --config configs/debug.yaml
 """
 
-import argparse
-import os
 import sys
-import yaml
 from pathlib import Path
-
-# 添加项目根目录到Python路径
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 import torch
 import numpy as np
-from omegaconf import OmegaConf
+import argparse
+from datetime import datetime
 
-from agsac.training.trainer import AGSACTrainer
-from agsac.utils.logger import setup_logger
-from agsac.utils.data_processing import set_seed
-
-
-def parse_args():
-    """解析命令行参数"""
-    parser = argparse.ArgumentParser(description="AGSAC训练脚本")
-    
-    # 配置文件
-    parser.add_argument(
-        "--config", 
-        type=str, 
-        default="configs/training_config.yaml",
-        help="配置文件路径"
-    )
-    
-    # 预训练模型
-    parser.add_argument(
-        "--pretrained",
-        type=str,
-        default=None,
-        help="预训练模型路径"
-    )
-    
-    # 输出目录
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="outputs/experiments",
-        help="输出目录"
-    )
-    
-    # 设备配置
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        choices=["auto", "cpu", "cuda", "mps"],
-        help="计算设备"
-    )
-    
-    # 随机种子
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="随机种子"
-    )
-    
-    # 调试模式
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="调试模式"
-    )
-    
-    # 恢复训练
-    parser.add_argument(
-        "--resume",
-        type=str,
-        default=None,
-        help="恢复训练的检查点路径"
-    )
-    
-    return parser.parse_args()
-
-
-def setup_device(device_arg, config):
-    """设置计算设备"""
-    if device_arg == "auto":
-        if torch.cuda.is_available():
-            device = "cuda"
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            device = "mps"
-        else:
-            device = "cpu"
-    else:
-        device = device_arg
-    
-    print(f"使用设备: {device}")
-    return device
-
-
-def load_config(config_path):
-    """加载配置文件"""
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"配置文件不存在: {config_path}")
-    
-    # 使用OmegaConf加载配置
-    config = OmegaConf.load(config_path)
-    
-    # 如果配置中有defaults，需要合并
-    if hasattr(config, 'defaults') and config.defaults:
-        base_config = OmegaConf.load(config.defaults[0])
-        config = OmegaConf.merge(base_config, config)
-    
-    return config
+from configs.train_config import AGSACConfig
+from agsac.models import AGSACModel
+from agsac.envs import DummyAGSACEnvironment
+from agsac.training import AGSACTrainer
 
 
 def main():
-    """主函数"""
-    # 解析参数
-    args = parse_args()
+    parser = argparse.ArgumentParser(description="AGSAC训练（基于配置文件）")
+    parser.add_argument('--config', type=str, required=True,
+                        help='配置文件路径 (例如: configs/fixed_scene.yaml)')
+    parser.add_argument('--cpu', action='store_true',
+                        help='强制使用CPU（覆盖配置文件）')
+    args = parser.parse_args()
+    
+    # ===== 1. 加载配置 =====
+    print("=" * 70)
+    print("AGSAC训练开始")
+    print("=" * 70)
+    
+    config_path = project_root / args.config
+    print(f"\n[配置] 加载配置文件: {config_path}")
+    config = AGSACConfig.from_yaml(config_path)
+    
+    # 设备覆盖
+    if args.cpu:
+        config.device = 'cpu'
+        config.env.device = 'cpu'
+        config.model.device = 'cpu'
+    else:
+        # 自动检测CUDA
+        if torch.cuda.is_available() and config.device == 'cuda':
+            config.device = 'cuda'
+            config.env.device = 'cuda'
+            config.model.device = 'cuda'
+        else:
+            config.device = 'cpu'
+            config.env.device = 'cpu'
+            config.model.device = 'cpu'
+    
+    print(f"[配置] 训练模式: {config.mode}")
+    print(f"[配置] 设备: {config.device}")
+    print(f"[配置] Episodes: {config.training.episodes}")
+    print(f"[配置] 使用Corridor生成器: {config.env.use_corridor_generator}")
+    print(f"[配置] 课程学习: {config.env.curriculum_learning}")
     
     # 设置随机种子
-    set_seed(args.seed)
+    if config.seed is not None:
+        torch.manual_seed(config.seed)
+        np.random.seed(config.seed)
+        print(f"[配置] 随机种子: {config.seed}")
     
-    # 加载配置
-    config = load_config(args.config)
+    # ===== 2. 创建日志目录 =====
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = project_root / "logs" / f"{config.training.experiment_name}_{timestamp}"
+    log_dir.mkdir(parents=True, exist_ok=True)
     
-    # 设置设备
-    device = setup_device(args.device, config)
-    config.device.use_cuda = (device == "cuda")
-    config.device.device_id = 0
+    # 保存配置
+    config.to_yaml(log_dir / "config.yaml")
+    config.to_json(log_dir / "config.json")
+    print(f"[配置] 日志目录: {log_dir}")
+    print("")
     
-    # 设置输出目录
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # ===== 3. 创建环境 =====
+    print("[环境] 创建训练环境...")
+    env = DummyAGSACEnvironment(
+        max_pedestrians=config.env.max_pedestrians,
+        max_corridors=config.env.max_corridors,
+        max_vertices=config.env.max_vertices,
+        obs_horizon=config.env.obs_horizon,
+        pred_horizon=config.env.pred_horizon,
+        max_episode_steps=config.env.max_episode_steps,
+        use_geometric_reward=config.env.use_geometric_reward,
+        use_corridor_generator=config.env.use_corridor_generator,
+        curriculum_learning=config.env.curriculum_learning,
+        scenario_seed=config.env.scenario_seed,
+        device=config.env.device
+    )
+    print(f"[环境] 创建成功")
+    print("")
     
-    # 设置日志
-    logger = setup_logger(
-        name="AGSAC_Trainer",
-        log_dir=output_dir / "logs",
-        level=config.logging.level
+    # ===== 4. 创建模型 =====
+    print("[模型] 创建AGSAC模型...")
+    
+    # 查找预训练权重
+    if config.model.use_pretrained_predictor and config.model.pretrained_weights_path:
+        pretrained_path = Path(config.model.pretrained_weights_path)
+        if not pretrained_path.exists():
+            print(f"[警告] 预训练权重不存在: {pretrained_path}")
+            pretrained_path = None
+    else:
+        pretrained_path = None
+    
+    model = AGSACModel(
+        action_dim=config.model.action_dim,
+        hidden_dim=config.model.hidden_dim,
+        num_modes=config.model.num_modes,
+        max_pedestrians=config.model.max_pedestrians,
+        max_corridors=config.model.max_corridors,
+        max_vertices=config.model.max_vertices,
+        obs_horizon=config.model.obs_horizon,
+        pred_horizon=config.model.pred_horizon,
+        actor_lr=config.training.actor_lr,
+        critic_lr=config.training.critic_lr,
+        gamma=config.training.gamma,
+        tau=config.training.tau,
+        use_pretrained_predictor=pretrained_path is not None,
+        pretrained_weights_path=str(pretrained_path) if pretrained_path else None,
+        device=config.model.device
     )
     
-    logger.info("=" * 50)
-    logger.info("AGSAC训练开始")
-    logger.info("=" * 50)
-    logger.info(f"配置文件: {args.config}")
-    logger.info(f"输出目录: {output_dir}")
-    logger.info(f"设备: {device}")
-    logger.info(f"随机种子: {args.seed}")
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[模型] 可训练参数: {trainable_params:,}")
+    print("")
     
-    if args.pretrained:
-        logger.info(f"预训练模型: {args.pretrained}")
+    # ===== 5. 创建训练器 =====
+    print("[训练器] 创建AGSACTrainer...")
+    trainer = AGSACTrainer(
+        model=model,
+        env=env,
+        eval_env=None,
+        buffer_capacity=config.training.buffer_capacity,
+        seq_len=config.training.seq_len,
+        batch_size=config.training.batch_size,
+        warmup_episodes=config.training.warmup_episodes,
+        updates_per_episode=config.training.updates_per_episode,
+        eval_interval=config.training.eval_interval,
+        save_interval=config.training.save_interval,
+        log_interval=config.training.log_interval,
+        max_episodes=config.training.episodes,
+        device=config.device,
+        save_dir=str(log_dir),
+        experiment_name=config.training.experiment_name,
+        use_tensorboard=config.training.use_tensorboard
+    )
+    print(f"[训练器] 创建成功")
+    print(f"  - Buffer容量: {config.training.buffer_capacity}")
+    print(f"  - 序列长度: {config.training.seq_len}")
+    print(f"  - Batch大小: {config.training.batch_size}")
+    print("")
     
-    if args.resume:
-        logger.info(f"恢复训练: {args.resume}")
+    # ===== 6. 开始训练 =====
+    print("=" * 70)
+    print("开始训练")
+    print("=" * 70)
+    print("")
     
-    # 创建训练器
-    try:
-        trainer = AGSACTrainer(
-            config=config,
-            output_dir=output_dir,
-            device=device,
-            logger=logger
-        )
-        
-        # 加载预训练模型
-        if args.pretrained:
-            trainer.load_pretrained(args.pretrained)
-        
-        # 恢复训练
-        if args.resume:
-            trainer.load_checkpoint(args.resume)
-        
-        # 开始训练
-        trainer.train()
-        
-        logger.info("训练完成!")
-        
-    except KeyboardInterrupt:
-        logger.info("训练被用户中断")
-    except Exception as e:
-        logger.error(f"训练过程中发生错误: {e}")
-        raise
-    finally:
-        logger.info("=" * 50)
+    # AGSACTrainer的train方法不需要参数（已在init中设置）
+    train_history = trainer.train()
+    
+    print("")
+    print("=" * 70)
+    print("训练完成！")
+    print("=" * 70)
+    print(f"日志保存在: {log_dir}")
+    print(f"模型保存在: {trainer.save_dir}")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

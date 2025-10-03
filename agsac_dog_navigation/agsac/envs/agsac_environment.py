@@ -15,6 +15,8 @@ import torch
 import numpy as np
 from typing import Dict, Tuple, Optional, List
 from abc import ABC, abstractmethod
+from agsac.models.evaluator.geometric_evaluator import GeometricDifferentialEvaluator
+from agsac.envs.corridor_generator import CorridorGenerator
 
 
 class AGSACEnvironment(ABC):
@@ -537,10 +539,36 @@ class DummyAGSACEnvironment(AGSACEnvironment):
     - 简单的碰撞检测
     """
     
-    def __init__(self, **kwargs):
+    def __init__(
+        self, 
+        use_corridor_generator: bool = False,
+        curriculum_learning: bool = False,
+        scenario_seed: Optional[int] = None,
+        **kwargs
+    ):
+        """
+        Args:
+            use_corridor_generator: 是否使用自动场景生成器（默认False，使用固定场景）
+            curriculum_learning: 是否启用课程学习（从easy到hard）
+            scenario_seed: 场景生成的随机种子
+        """
         super().__init__(**kwargs)
         
-        # 环境参数
+        # 场景生成器配置
+        self.use_corridor_generator = use_corridor_generator
+        self.curriculum_learning = curriculum_learning
+        self.scenario_seed = scenario_seed
+        
+        if self.use_corridor_generator:
+            self.corridor_generator = CorridorGenerator(
+                map_size=(12.0, 12.0),
+                seed=scenario_seed
+            )
+            # 课程学习：初始难度
+            self.current_difficulty = 'easy' if curriculum_learning else 'medium'
+            self.episode_count = 0
+        
+        # 环境参数（默认固定场景）
         self.start_pos = np.array([0.0, 0.0])
         self.goal_pos = np.array([10.0, 10.0])
         
@@ -556,10 +584,25 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         # 固定的走廊（模拟）- 使用min来避免超过max_corridors
         self.num_corridors = min(2, self.max_corridors)
         self.corridor_data = []
+        
+        # 静态障碍物（仅用于固定场景）
+        self.static_obstacle = None
+        
+        # 几何微分评估器（方向一致性GDE）
+        self.gde = GeometricDifferentialEvaluator(eta=0.3, M=10)
     
     def _reset_env(self) -> Dict:
         """重置环境"""
-        # 重置机器狗状态
+        
+        # ===== 1. 场景生成（动态 vs 固定） =====
+        if self.use_corridor_generator:
+            # 动态生成场景
+            self._generate_dynamic_scenario()
+        else:
+            # 使用固定场景（向后兼容）
+            self._setup_fixed_scenario()
+        
+        # ===== 2. 重置机器狗状态 =====
         self.robot_position = self.start_pos.copy()
         self.robot_velocity = np.array([0.0, 0.0])
         self.robot_orientation = 0.0
@@ -567,39 +610,166 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         # 重置距离记录（用于计算进展奖励）
         self.last_distance = np.linalg.norm(self.goal_pos - self.start_pos)
         
-        # 初始化行人轨迹（修复：让行人远离起点，避免初始碰撞）
+        return {}
+    
+    def _generate_dynamic_scenario(self):
+        """使用生成器动态生成场景（带课程学习）"""
+        
+        # 课程学习：根据episode数量调整难度
+        if self.curriculum_learning:
+            if self.episode_count < 50:
+                self.current_difficulty = 'easy'
+            elif self.episode_count < 150:
+                self.current_difficulty = 'medium'
+            else:
+                self.current_difficulty = 'hard'
+        
+        # 生成场景
+        scenario = self.corridor_generator.generate_scenario(
+            difficulty=self.current_difficulty
+        )
+        
+        # 更新环境状态
+        self.start_pos = scenario['start']
+        self.goal_pos = scenario['goal']
+        self.corridor_data = scenario['corridors']
+        self.static_obstacle = scenario['obstacles'] if scenario['obstacles'] else None
+        
+        # 更新行人数量和位置（在corridor内随机生成）
+        self.num_pedestrians = min(
+            scenario['num_pedestrians'],
+            self.max_pedestrians
+        )
+        self.pedestrian_trajectories = self._generate_pedestrian_positions(
+            self.num_pedestrians
+        )
+        
+        # 增加episode计数
+        self.episode_count += 1
+    
+    def _setup_fixed_scenario(self):
+        """设置固定场景（向后兼容）"""
+        
+        # 固定起点和终点
+        self.start_pos = np.array([0.0, 0.0])
+        self.goal_pos = np.array([10.0, 10.0])
+        
+        # 固定行人位置（修复：让行人远离起点，避免初始碰撞）
         self.pedestrian_trajectories = [
             {'id': 0, 'trajectory': [[3.0, 1.0]]},  # 行人1在侧面
             {'id': 1, 'trajectory': [[5.0, 3.0]]},  # 行人2在中间
             {'id': 2, 'trajectory': [[7.0, 7.0]]},  # 行人3靠近目标
         ][:self.num_pedestrians]  # 只取需要的数量
         
-        # 初始化走廊
+        # 固定走廊：两条从起点到终点的独立可选路线
+        # 场景：中间有障碍物(4,3)-(6,7)，提供上下两条绕行路径
         self.corridor_data = [
-            np.array([[-2, -2], [12, -2], [12, 12], [-2, 12]]),  # 大边界走廊
-            np.array([[2, 2], [8, 2], [8, 8], [2, 8]])  # 中间通道
+            # 通路1：上方绕行路线（L型区域）
+            np.array([
+                [-0.5, -0.5],   # 起点区域外扩（包含0,0）
+                [-0.5, 11.0],   # 左上
+                [3.5, 11.0],    # 向右（障碍物左侧）
+                [3.5, 7.5],     # 向下到障碍物上方
+                [6.5, 7.5],     # 越过障碍物
+                [6.5, 11.0],    # 向上
+                [11.0, 11.0],   # 右上（包含10,10）
+                [11.0, -0.5],   # 右下
+                [6.5, -0.5],    # 回来
+                [6.5, 6.0],     # 内边界（避开障碍物）
+                [3.5, 6.0],     # 障碍物左侧
+                [3.5, -0.5]     # 回到起点
+            ]),
+            
+            # 通路2：下方绕行路线（L型区域）
+            np.array([
+                [-0.5, 11.0],   # 起点区域左上
+                [-0.5, -0.5],   # 左下（包含0,0）
+                [3.5, -0.5],    # 向右
+                [3.5, 2.5],     # 向上到障碍物下方
+                [6.5, 2.5],     # 越过障碍物
+                [6.5, -0.5],    # 向下
+                [11.0, -0.5],   # 右下
+                [11.0, 11.0],   # 右上（包含10,10）
+                [6.5, 11.0],    # 回来
+                [6.5, 4.0],     # 内边界（避开障碍物）
+                [3.5, 4.0],     # 障碍物左侧
+                [3.5, 11.0]     # 回到起点
+            ])
         ]
         
-        return {}
+        # 静态障碍物
+        self.static_obstacle = np.array([
+            [4.0, 3.0], [6.0, 3.0], [6.0, 7.0], [4.0, 7.0]
+        ])
+    
+    def _generate_pedestrian_positions(self, num_pedestrians: int) -> List[Dict]:
+        """在corridor内随机生成行人初始位置"""
+        pedestrians = []
+        
+        # 在第一条corridor内随机选择位置
+        if self.corridor_data:
+            corridor = self.corridor_data[0]
+            min_x, max_x = corridor[:, 0].min(), corridor[:, 0].max()
+            min_y, max_y = corridor[:, 1].min(), corridor[:, 1].max()
+            
+            for i in range(num_pedestrians):
+                # 随机位置
+                x = np.random.uniform(min_x + 1, max_x - 1)
+                y = np.random.uniform(min_y + 1, max_y - 1)
+                
+                pedestrians.append({
+                    'id': i,
+                    'trajectory': [[x, y]]
+                })
+        
+        return pedestrians
     
     def _step_env(self, action: np.ndarray) -> Dict:
         """
         执行动作
         
         Args:
-            action: (action_dim,) 简化为 (dx, dy) 位移
+            action: (22,) = 11个路径点(x,y)，或兼容旧版(2,)
         """
-        # 简化：action直接作为位移
-        # 实际中action是路径点，需要控制器执行
-        dx = action[0] * 0.1  # 缩放
-        dy = action[1] * 0.1
+        # 路径跟踪简化版：朝向第一个路径点移动
+        if len(action) == 22:
+            # 标准格式：11个路径点
+            path_normalized = action.reshape(11, 2)  # [-1, 1] 范围（假设Actor输出使用tanh）
+            
+            # 坐标转换：归一化 → 相对 → 全局
+            scale = 2.0  # 每个点的最大偏移范围 ±2米
+            path_relative = path_normalized * scale  # [-2m, +2m]
+            path_global = self.robot_position + path_relative  # 全局坐标
+            
+            # 保存完整路径用于GDE评估
+            self.current_planned_path = path_global.copy()
+            
+            # 取第一个路径点作为短期目标
+            target_point = path_global[0]
+            
+            # 计算朝向目标的位移
+            direction = target_point - self.robot_position
+            direction_norm = np.linalg.norm(direction)
+            if direction_norm > 1e-6:
+                direction = direction / direction_norm
+            # 以固定速度朝目标移动
+            speed = 0.5  # m/s
+            dt = 0.1     # s
+            displacement = direction * speed * dt
+        elif len(action) == 2:
+            # 兼容旧版：直接位移
+            dx = action[0] * 0.1
+            dy = action[1] * 0.1
+            displacement = np.array([dx, dy])
+        else:
+            raise ValueError(f"Action维度错误: {len(action)}，应为22或2")
         
-        self.robot_position += np.array([dx, dy])
-        self.robot_velocity = np.array([dx, dy]) / 0.1  # dt=0.1
+        self.robot_position += displacement
+        self.robot_velocity = displacement / 0.1  # dt=0.1
         
         # 更新朝向
-        if abs(dx) > 1e-6 or abs(dy) > 1e-6:
-            self.robot_orientation = np.arctan2(dy, dx)
+        if np.linalg.norm(displacement) > 1e-6:
+            self.robot_orientation = np.arctan2(displacement[1], displacement[0])
         
         # 更新行人轨迹（模拟移动）
         for ped in self.pedestrian_trajectories:
@@ -653,6 +823,74 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         
         return False
     
+    def _evaluate_path_curvature(self, path: np.ndarray) -> float:
+        """
+        基于夹角积分的路径平滑度评估
+        
+        数学原理：
+        1. 计算相邻向量：vᵢ = pᵢ₊₁ - pᵢ
+        2. 计算转角：θᵢ = arccos(vᵢ·vᵢ₊₁ / (‖vᵢ‖·‖vᵢ₊₁‖))
+        3. 总转角（夹角积分）：Θ = Σθᵢ
+        4. 指数评分：score = exp(-α·Θ)
+        
+        Args:
+            path: (11, 2) 全局坐标的路径点
+        
+        Returns:
+            score: float ∈ (0, 1]
+                1.0 = 完美直线（无转角）
+                0.0 = 极度曲折（大量转角）
+        """
+        if len(path) < 3:
+            # 路径太短，无法评估
+            return 0.0
+        
+        # 步骤1：计算相邻向量
+        vectors = np.diff(path, axis=0)  # (10, 2)
+        
+        # 步骤2：计算向量长度
+        lengths = np.linalg.norm(vectors, axis=1)  # (10,)
+        
+        # 过滤零向量（避免除零）
+        eps = 1e-6
+        valid_mask = lengths > eps
+        
+        if valid_mask.sum() < 2:
+            # 有效向量太少，无法计算转角
+            return 0.0
+        
+        # 步骤3：计算相邻向量之间的转角
+        angles = []
+        
+        for i in range(len(vectors) - 1):
+            if valid_mask[i] and valid_mask[i + 1]:
+                # 归一化向量
+                v1 = vectors[i] / lengths[i]
+                v2 = vectors[i + 1] / lengths[i + 1]
+                
+                # 点积（余弦值）
+                cos_theta = np.dot(v1, v2)
+                
+                # 限制到[-1, 1]（数值稳定性）
+                cos_theta = np.clip(cos_theta, -1.0, 1.0)
+                
+                # 转角
+                theta = np.arccos(cos_theta)  # [0, π]
+                
+                angles.append(theta)
+        
+        if len(angles) == 0:
+            return 0.0
+        
+        # 步骤4：总转角（夹角积分）
+        total_angle = np.sum(angles)
+        
+        # 步骤5：指数评分
+        alpha = 1.0  # 衰减系数
+        score = np.exp(-alpha * total_angle)  # (0, 1]
+        
+        return score
+    
     def _compute_base_reward(self, action: np.ndarray, collision: bool) -> float:
         """计算基础奖励（改进版本）"""
         # 当前到目标的距离
@@ -678,17 +916,47 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         collision_penalty = -50.0 if collision else 0.0
         
         # 小的步数惩罚（鼓励快速完成）
-        step_penalty = -0.01
+        step_penalty = -0.001  # 从-0.01降低到-0.001，避免压过GDE信号
         
         # 距离惩罚（轻微，避免停滞）
-        distance_penalty = -current_distance * 0.01
+        distance_penalty = -current_distance * 0.001  # 从0.01降低到0.001
         
+        # ========== GDE评估（路径质量）==========
+        direction_reward = 0.0
+        curvature_reward = 0.0
+        
+        if hasattr(self, 'current_planned_path'):
+            # 1. 方向一致性GDE（朝向目标）
+            try:
+                path_tensor = torch.from_numpy(self.current_planned_path).float()
+                reference_line = torch.from_numpy(self.goal_pos - self.robot_position).float()
+                
+                direction_score = self.gde(path_tensor, reference_line).item()
+                # direction_score ∈ [0, 1]，权重0.3
+                direction_reward = direction_score * 0.3
+            except Exception as e:
+                # 如果评估失败，不加分也不扣分
+                direction_reward = 0.0
+            
+            # 2. 路径平滑度GDE（曲率评估）
+            try:
+                curvature_score = self._evaluate_path_curvature(self.current_planned_path)
+                # curvature_score ∈ (0, 1]，转换到[-1, 1]再加权
+                # score=1.0 → +0.5, score=0.5 → 0, score=0 → -0.5
+                normalized_curvature = 2.0 * curvature_score - 1.0
+                curvature_reward = normalized_curvature * 0.5
+            except Exception as e:
+                curvature_reward = 0.0
+        
+        # ========== 总奖励 ==========
         total_reward = (
-            progress_reward + 
-            goal_reached_reward + 
-            collision_penalty + 
-            step_penalty +
-            distance_penalty
+            progress_reward +       # 主导：~10.0 per meter
+            direction_reward +      # 方向一致性：0~0.3
+            curvature_reward +      # 路径平滑度：-0.5~0.5
+            goal_reached_reward +   # 稀疏：100.0
+            collision_penalty +     # 稀疏：-50.0
+            step_penalty +          # 极小：-0.001
+            distance_penalty        # 极小：~-0.01
         )
         
         return total_reward
