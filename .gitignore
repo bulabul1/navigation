@@ -1,0 +1,24 @@
+# WWW_navigetion 根目录 .gitignore
+
+# 忽略SocialCircle相关的第三方代码和权重
+Project-Monandaeg-SocialCircle/
+SocialCircle/
+
+# Python缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 日志文件
+*.log
+
+# 临时文件
+*.tmp
+*.temp
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
