@@ -564,6 +564,9 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         self.robot_velocity = np.array([0.0, 0.0])
         self.robot_orientation = 0.0
         
+        # 重置距离记录（用于计算进展奖励）
+        self.last_distance = np.linalg.norm(self.goal_pos - self.start_pos)
+        
         # 初始化行人轨迹（修复：让行人远离起点，避免初始碰撞）
         self.pedestrian_trajectories = [
             {'id': 0, 'trajectory': [[3.0, 1.0]]},  # 行人1在侧面
@@ -651,20 +654,44 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         return False
     
     def _compute_base_reward(self, action: np.ndarray, collision: bool) -> float:
-        """计算基础奖励"""
-        # 目标进展奖励
-        goal_vector = self.goal_pos - self.robot_position
-        distance_to_goal = np.linalg.norm(goal_vector)
+        """计算基础奖励（改进版本）"""
+        # 当前到目标的距离
+        current_distance = np.linalg.norm(self.goal_pos - self.robot_position)
         
-        # 距离奖励（越近越好）
-        distance_reward = -distance_to_goal * 0.1
+        # 计算进展（如果有上一步的距离记录）
+        if not hasattr(self, 'last_distance'):
+            self.last_distance = np.linalg.norm(self.goal_pos - self.start_pos)
         
-        # 到达目标奖励
+        # 进展奖励：向目标靠近得正奖励，远离得负奖励
+        progress = self.last_distance - current_distance
+        progress_reward = progress * 10.0  # 放大进展的影响
+        
+        # 更新距离记录
+        self.last_distance = current_distance
+        
+        # 到达目标的大奖励
         goal_reached_reward = 0.0
-        if distance_to_goal < 0.5:
-            goal_reached_reward = self.reward_weights['goal_reached']
+        if current_distance < 0.5:
+            goal_reached_reward = 100.0  # 大幅增加到达奖励
         
-        return distance_reward + goal_reached_reward
+        # 碰撞惩罚
+        collision_penalty = -50.0 if collision else 0.0
+        
+        # 小的步数惩罚（鼓励快速完成）
+        step_penalty = -0.01
+        
+        # 距离惩罚（轻微，避免停滞）
+        distance_penalty = -current_distance * 0.01
+        
+        total_reward = (
+            progress_reward + 
+            goal_reached_reward + 
+            collision_penalty + 
+            step_penalty +
+            distance_penalty
+        )
+        
+        return total_reward
 
 
 # ==================== 内置测试 ====================
