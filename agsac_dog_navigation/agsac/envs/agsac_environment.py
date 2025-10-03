@@ -564,16 +564,17 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         self.robot_velocity = np.array([0.0, 0.0])
         self.robot_orientation = 0.0
         
-        # 初始化行人轨迹
+        # 初始化行人轨迹（修复：让行人远离起点，避免初始碰撞）
         self.pedestrian_trajectories = [
-            {'id': i, 'trajectory': [[1.0 * i, 1.0 * i]]}
-            for i in range(self.num_pedestrians)
-        ]
+            {'id': 0, 'trajectory': [[3.0, 1.0]]},  # 行人1在侧面
+            {'id': 1, 'trajectory': [[5.0, 3.0]]},  # 行人2在中间
+            {'id': 2, 'trajectory': [[7.0, 7.0]]},  # 行人3靠近目标
+        ][:self.num_pedestrians]  # 只取需要的数量
         
         # 初始化走廊
         self.corridor_data = [
-            np.array([[0, 0], [5, 0], [5, 5], [0, 5]]),  # 矩形走廊1
-            np.array([[5, 5], [10, 5], [10, 10], [5, 10]])  # 矩形走廊2
+            np.array([[-2, -2], [12, -2], [12, 12], [-2, 12]]),  # 大边界走廊
+            np.array([[2, 2], [8, 2], [8, 8], [2, 8]])  # 中间通道
         ]
         
         return {}

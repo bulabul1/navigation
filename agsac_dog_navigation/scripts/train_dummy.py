@@ -32,6 +32,61 @@ def print_separator(title="", char="=", width=70):
     else:
         print(char * width)
 
+def adapt_observation_for_model(env_obs, device='cpu'):
+    """
+    将DummyEnvironment的observation格式转换为AGSACModel期望的格式
+    
+    Args:
+        env_obs: DummyEnvironment输出的observation
+        device: 设备
+    
+    Returns:
+        model_obs: AGSACModel期望的observation格式
+    """
+    # 提取robot_state
+    robot_state = env_obs['robot_state']
+    
+    # 创建dummy的过去轨迹（假设当前位置重复8次）
+    current_pos = robot_state['position'].unsqueeze(0)  # (1, 2)
+    past_trajectory = current_pos.unsqueeze(0).repeat(1, 8, 1)  # (1, 8, 2)
+    
+    # 创建走廊数据格式
+    corridor_vertices = env_obs['corridor_vertices']  # (max_corridors, max_vertices, 2)
+    corridor_mask = env_obs['corridor_mask']  # (max_corridors,)
+    
+    # 计算每个走廊的有效顶点数
+    # 简化：假设非零的顶点都是有效的
+    vertex_counts = []
+    for i in range(corridor_vertices.shape[0]):
+        if corridor_mask[i]:
+            # 计算非零顶点数
+            non_zero = (corridor_vertices[i].abs().sum(dim=1) > 0).sum().item()
+            vertex_counts.append(non_zero if non_zero > 0 else 4)  # 至少4个顶点
+        else:
+            vertex_counts.append(0)
+    vertex_counts = torch.tensor(vertex_counts, dtype=torch.long, device=device).unsqueeze(0)  # (1, max_corridors)
+    
+    # 构造模型期望的格式
+    model_obs = {
+        'dog': {
+            'trajectory': past_trajectory.to(device),  # (1, 8, 2)
+            'velocity': robot_state['velocity'].unsqueeze(0).to(device),  # (1, 2)
+            'position': robot_state['position'].unsqueeze(0).to(device),  # (1, 2)
+            'goal': (robot_state['position'] + robot_state['goal_vector']).unsqueeze(0).to(device)  # (1, 2)
+        },
+        'corridors': {
+            'polygons': corridor_vertices.unsqueeze(0).to(device),  # (1, max_corridors, max_vertices, 2)
+            'vertex_counts': vertex_counts,  # (1, max_corridors)
+            'mask': corridor_mask.unsqueeze(0).to(device)  # (1, max_corridors)
+        },
+        'pedestrians': {
+            'trajectories': env_obs['pedestrian_observations'].unsqueeze(0).to(device),  # (1, max_peds, obs_horizon, 2)
+            'mask': env_obs['pedestrian_mask'].unsqueeze(0).to(device)  # (1, max_peds)
+        }
+    }
+    
+    return model_obs
+
 def main():
     print_separator("AGSAC Dummy环境训练验证")
     print(f"\n项目根目录: {project_root}")
@@ -87,19 +142,33 @@ def main():
     # 创建模型
     print_separator("创建模型")
     
-    # 检查预训练权重
-    pretrained_path = project_root / "pretrained/social_circle/evsczara1/torch_epoch150.pt"
-    if not pretrained_path.exists():
-        print(f"[WARNING] 预训练权重不存在: {pretrained_path}")
+    # 检查预训练权重（尝试多个可能的路径）
+    possible_paths = [
+        project_root.parent / "Project-Monandaeg-SocialCircle/evsczara1",
+        project_root / "pretrained/social_circle/evsczara1",
+    ]
+    
+    pretrained_weights_path = None
+    for base_path in possible_paths:
+        if base_path.exists():
+            # 尝试多个可能的权重文件名
+            for filename in ["torch_test_new__epoch65.pt", "evsc_weights.pth", "torch_epoch150.pt"]:
+                weight_file = base_path / filename
+                if weight_file.exists():
+                    pretrained_weights_path = base_path  # PretrainedTrajectoryPredictor需要目录路径
+                    print(f"[OK] 找到预训练权重: {weight_file}")
+                    break
+            if pretrained_weights_path:
+                break
+    
+    if pretrained_weights_path is None:
+        print(f"[WARNING] 未找到预训练权重")
         print("[INFO] 将使用简化的轨迹预测器（fallback）")
         use_pretrained = False
-        pretrained_weights_path = None
     else:
-        print(f"[OK] 找到预训练权重: {pretrained_path}")
         use_pretrained = True
-        pretrained_weights_path = pretrained_path
     
-    print("\n创建AGSACModel...")
+    print("\n创建AGSACModel（参数优化版本）...")
     model = AGSACModel(
         max_pedestrians=10,
         max_corridors=10,
@@ -107,7 +176,7 @@ def main():
         obs_horizon=8,
         pred_horizon=12,
         action_dim=2,           # (linear_vel, angular_vel)
-        hidden_dim=256,
+        hidden_dim=128,         # 减小: 256 -> 128
         use_pretrained_predictor=use_pretrained,
         pretrained_weights_path=pretrained_weights_path,
         device=device
@@ -130,7 +199,9 @@ def main():
     print("\n测试模型前向传播...")
     model.eval()
     with torch.no_grad():
-        action_output = model(obs)
+        # 将环境observation适配为模型期望的格式
+        model_obs = adapt_observation_for_model(obs, device=device)
+        action_output = model(model_obs)
     print(f"[OK] 前向传播成功")
     print(f"  action shape: {action_output['action'].shape}")
     print(f"  log_prob shape: {action_output['log_prob'].shape}")

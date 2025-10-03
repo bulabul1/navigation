@@ -171,6 +171,10 @@ class SACAgent(nn.Module):
         Returns:
             logs: dict，包含损失和指标信息
         """
+        # 设置训练模式（修复：确保LSTM可以做backward）
+        self.actor.train()
+        self.critic.train()
+        
         batch_size = len(segment_batch)
         
         # 累积损失
@@ -199,11 +203,17 @@ class SACAgent(nn.Module):
             
             seq_len = states.shape[0]
             
-            # 初始化隐藏状态
+            # 初始化隐藏状态（从segment中提取或设为None）
             # Critic更新时hidden=None（根据设计决策）
-            h_c1 = None
-            h_c2 = None
-            h_actor = None
+            init_hidden = segment.get('init_hidden', None)
+            if init_hidden is not None and isinstance(init_hidden, dict):
+                h_actor = init_hidden.get('actor', None)
+                h_c1 = init_hidden.get('critic1', None)
+                h_c2 = init_hidden.get('critic2', None)
+            else:
+                h_c1 = None
+                h_c2 = None
+                h_actor = None
             
             # 逐步计算target Q和current Q
             for t in range(seq_len):
@@ -265,10 +275,14 @@ class SACAgent(nn.Module):
             states = segment['states'].to(self.device)
             seq_len = states.shape[0]
             
-            # 重置隐藏状态
-            h_actor = segment['init_hidden_actor']
-            if h_actor is not None:
-                h_actor = (h_actor[0].to(self.device), h_actor[1].to(self.device))
+            # 重置隐藏状态（从segment中提取）
+            init_hidden = segment.get('init_hidden', None)
+            if init_hidden is not None and isinstance(init_hidden, dict):
+                h_actor = init_hidden.get('actor', None)
+                if h_actor is not None and isinstance(h_actor, tuple):
+                    h_actor = (h_actor[0].to(self.device), h_actor[1].to(self.device))
+            else:
+                h_actor = None
             
             # 逐步重新采样动作并计算loss
             for t in range(seq_len):
@@ -307,9 +321,15 @@ class SACAgent(nn.Module):
             for segment in segment_batch:
                 states = segment['states'].to(self.device)
                 seq_len = states.shape[0]
-                h_actor = segment['init_hidden_actor']
-                if h_actor is not None:
-                    h_actor = (h_actor[0].to(self.device), h_actor[1].to(self.device))
+                
+                # 获取初始隐藏状态
+                init_hidden = segment.get('init_hidden', None)
+                if init_hidden is not None and isinstance(init_hidden, dict):
+                    h_actor = init_hidden.get('actor', None)
+                    if h_actor is not None and isinstance(h_actor, tuple):
+                        h_actor = (h_actor[0].to(self.device), h_actor[1].to(self.device))
+                else:
+                    h_actor = None
                 
                 for t in range(seq_len):
                     _, log_prob, h_actor = self.actor(
