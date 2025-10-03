@@ -98,8 +98,9 @@ class AGSACModel(nn.Module):
         target_entropy: Optional[float] = None,
         max_grad_norm: float = 1.0,
         
-        # 预训练模型路径
-        pretrained_e_v2_net_path: Optional[str] = None,
+        # 预训练模型配置
+        use_pretrained_predictor: bool = False,
+        pretrained_weights_path: Optional[str] = None,
         
         # 设备
         device: str = 'cpu'
@@ -129,7 +130,8 @@ class AGSACModel(nn.Module):
             auto_entropy: 是否自动调节熵系数
             target_entropy: 目标熵
             max_grad_norm: 梯度裁剪阈值
-            pretrained_e_v2_net_path: 预训练E-V2-Net路径
+            use_pretrained_predictor: 是否使用预训练轨迹预测器
+            pretrained_weights_path: 预训练模型权重路径（如 'weights/SocialCircle/evsczara1'）
             device: 设备
         """
         super().__init__()
@@ -174,12 +176,23 @@ class AGSACModel(nn.Module):
         
         # ==================== 2. 预测层 ====================
         
-        self.trajectory_predictor = create_trajectory_predictor(
-            predictor_type='simple',
-            social_circle_dim=social_feature_dim,
-            prediction_horizon=pred_horizon,
-            num_modes=num_modes
-        )
+        # 根据配置选择预测器类型
+        if use_pretrained_predictor and pretrained_weights_path:
+            print(f"[INFO] 使用预训练轨迹预测器: {pretrained_weights_path}")
+            self.trajectory_predictor = create_trajectory_predictor(
+                predictor_type='pretrained',
+                weights_path=pretrained_weights_path,
+                freeze=True,
+                fallback_to_simple=True
+            )
+        else:
+            print(f"[INFO] 使用简化轨迹预测器")
+            self.trajectory_predictor = create_trajectory_predictor(
+                predictor_type='simple',
+                social_circle_dim=social_feature_dim,
+                prediction_horizon=pred_horizon,
+                num_modes=num_modes
+            )
         
         # ==================== 3. 行人编码层 ====================
         

@@ -230,10 +230,10 @@ class PretrainedTrajectoryPredictor(TrajectoryPredictorInterface):
         try:
             self._load_pretrained_model()
             self.using_pretrained = True
-            print(f"✓ 成功加载预训练模型: {weights_path}")
+            print(f"[OK] 成功加载预训练模型: {weights_path}")
         except Exception as e:
             if fallback_to_simple:
-                print(f"⚠ 加载预训练模型失败: {e}")
+                print(f"[WARN] 加载预训练模型失败: {e}")
                 print(f"  回退到简化实现...")
                 self._use_simple_predictor()
                 self.using_pretrained = False
@@ -245,72 +245,219 @@ class PretrainedTrajectoryPredictor(TrajectoryPredictorInterface):
                 param.requires_grad = False
     
     def _load_pretrained_model(self):
-        """加载预训练模型（需要根据实际开源代码调整）"""
-        # TODO: 根据实际的开源代码实现加载逻辑
-        # 这里是一个框架示例
+        """从SocialCircle加载预训练的EVSCModel"""
+        import os
+        import sys
         
-        if not self.weights_path.exists():
-            raise FileNotFoundError(f"权重文件不存在: {self.weights_path}")
+        # 设置环境变量避免OpenMP冲突
+        os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
         
-        # 方法1: 如果有完整的模型文件
+        # 保存当前工作目录和sys.path
+        original_dir = os.getcwd()
+        original_path_len = len(sys.path)
+        
+        # SocialCircle目录
+        sc_dir = Path(__file__).parent.parent.parent.parent / 'external' / 'SocialCircle_original'
+        
+        if not sc_dir.exists():
+            raise FileNotFoundError(f"SocialCircle目录不存在: {sc_dir}")
+        
+        # 切换到SocialCircle目录
+        os.chdir(sc_dir)
+        
+        # 添加到sys.path（记录位置以便清理）
+        sc_dir_str = str(sc_dir)
+        if sc_dir_str not in sys.path:
+            sys.path.insert(0, sc_dir_str)
+        
         try:
-            checkpoint = torch.load(self.weights_path, map_location='cpu')
+            # 导入main函数
+            from main import main
             
-            # 假设checkpoint包含 'social_circle' 和 'e_v2_net' 的权重
-            # 实际结构需要根据开源代码调整
-            if 'social_circle' in checkpoint and 'e_v2_net' in checkpoint:
-                from agsac.models.encoders.social_circle import SocialCircle
-                
-                self.social_circle = SocialCircle()
-                self.social_circle.load_state_dict(checkpoint['social_circle'])
-                
-                self.e_v2_net = SimpleE_V2_Net()  # 或加载原始E-V2-Net
-                self.e_v2_net.load_state_dict(checkpoint['e_v2_net'])
-            else:
-                raise ValueError("权重文件格式不符合预期")
-        
-        except Exception as e:
-            # 方法2: 如果需要从原始代码导入
-            # 尝试从 pretrained/social_circle/original_code 导入
-            import sys
-            original_code_path = self.weights_path.parent.parent / 'original_code'
-            if original_code_path.exists():
-                sys.path.insert(0, str(original_code_path))
-                try:
-                    # 假设原始代码有这些模块
-                    # from models.social_circle import SocialCircleModel
-                    # from models.e_v2_net import EV2NetModel
-                    # self.social_circle = SocialCircleModel()
-                    # self.e_v2_net = EV2NetModel()
-                    # 加载权重...
-                    pass
-                finally:
-                    sys.path.pop(0)
+            # 调用main加载模型（不运行测试）
+            # 关键：必须指定 --model evsc，默认使用GPU 0
+            print(f"[INFO] 正在加载模型...")
+            print(f"  - 权重路径: {self.weights_path}")
             
-            raise e
+            # 检查GPU是否可用
+            gpu_id = '0' if torch.cuda.is_available() else '-1'
+            print(f"  - 使用设备: {'GPU' if gpu_id == '0' else 'CPU'}")
+            
+            structure = main(
+                ['--model', 'evsc', '--load', str(self.weights_path), '--gpu', gpu_id],
+                run_train_or_test=False
+            )
+            
+            # 检查返回值
+            if structure is None:
+                raise ValueError("main()返回None，模型加载失败")
+            
+            print(f"[INFO] Structure创建成功: {type(structure).__name__}")
+            
+            # 因为run_train_or_test=False，模型未创建，需要手动创建
+            if structure.model is None:
+                print(f"[INFO] 手动创建模型...")
+                structure.model = structure.create_model().to(structure.device)
+                
+                # 加载预训练权重
+                if self.weights_path.exists():
+                    print(f"[INFO] 加载预训练权重...")
+                    structure.model.load_weights_from_logDir(str(self.weights_path))
+            
+            # 保存模型对象和设备信息
+            self.evsc_model = structure.model
+            self.evsc_model.eval()
+            self.device = structure.device  # 保存设备信息
+            
+            print(f"[INFO] 模型设备: {self.device}")
+            
+            # 保存配置信息（动态获取模态数）
+            self.obs_frames = getattr(structure.args, 'obs_frames', 8)
+            self.pred_frames = getattr(structure.args, 'pred_frames', 12)
+            
+            # 模态数 = K(测试重复) × Kc(风格通道)
+            K = getattr(structure.args, 'K', 1)
+            Kc = getattr(structure.args, 'Kc', 20)
+            self.num_modes = K * Kc
+            
+            print(f"[OK] EVSCModel加载成功")
+            print(f"  - obs_frames: {self.obs_frames}")
+            print(f"  - pred_frames: {self.pred_frames}")
+            print(f"  - num_modes: {self.num_modes} (K={K} × Kc={Kc})")
+            
+        finally:
+            # 清理sys.path（移除添加的路径）
+            while len(sys.path) > original_path_len:
+                removed = sys.path.pop(0)
+                if removed != sc_dir_str:
+                    # 如果不是我们添加的，放回去
+                    sys.path.insert(0, removed)
+                    break
+            
+            # 恢复原目录
+            os.chdir(original_dir)
     
     def _use_simple_predictor(self):
         """使用简化实现作为后备方案"""
         simple_predictor = SimpleTrajectoryPredictor()
         self.social_circle = simple_predictor.social_circle
         self.e_v2_net = simple_predictor.e_v2_net
+        # 设置默认设备
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    def _interpolate_keypoints(self, keypoints: torch.Tensor) -> torch.Tensor:
+        """
+        分段线性插值关键点到完整轨迹
+        
+        EVSCModel输出3个关键点在时间步 t=[4, 8, 11]
+        需要插值到完整的12个时间步 t=[0, 1, ..., 11]
+        
+        Args:
+            keypoints: (batch, K, 3, 2) - K个模态，每个3个关键点
+        
+        Returns:
+            full_traj: (batch, K, 12, 2) - K个模态，每个12个点
+        """
+        batch, K, n_key, dim = keypoints.shape
+        device = keypoints.device
+        
+        # 创建输出tensor
+        full_traj = torch.zeros(batch, K, 12, dim, device=device)
+        
+        # 对每个时间步进行插值
+        # 关键点对应时间: t=[4, 8, 11]
+        for t in range(12):
+            t_val = float(t)
+            
+            if t <= 4:
+                # 区间 [0, 4]: 保持第一个关键点的值（避免从原点引入假位移）
+                full_traj[:, :, t, :] = keypoints[:, :, 0, :]
+                
+            elif t <= 8:
+                # 区间 (4, 8]: 从第一个关键点线性插值到第二个关键点
+                alpha = (t_val - 4.0) / 4.0  # (t-4)/(8-4)
+                full_traj[:, :, t, :] = (
+                    (1 - alpha) * keypoints[:, :, 0, :] +
+                    alpha * keypoints[:, :, 1, :]
+                )
+                
+            else:  # t > 8, t <= 11
+                # 区间 (8, 11]: 从第二个关键点线性插值到第三个关键点
+                alpha = (t_val - 8.0) / 3.0  # (t-8)/(11-8)
+                full_traj[:, :, t, :] = (
+                    (1 - alpha) * keypoints[:, :, 1, :] +
+                    alpha * keypoints[:, :, 2, :]
+                )
+        
+        return full_traj
     
     def forward(
         self,
         target_trajectory: torch.Tensor,
         neighbor_trajectories: torch.Tensor,
-        neighbor_angles: torch.Tensor,
+        neighbor_angles: torch.Tensor = None,
         neighbor_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """实现接口"""
-        social_features = self.social_circle(
-            target_trajectory,
-            neighbor_trajectories,
-            neighbor_angles,
-            neighbor_mask
-        )
+        """
+        前向传播 - 预测未来轨迹
         
-        predictions = self.e_v2_net(social_features)
+        Args:
+            target_trajectory: (batch, obs_frames, 2) 目标行人轨迹
+            neighbor_trajectories: (batch, N, obs_frames, 2) 邻居轨迹
+            neighbor_angles: 未使用（EVSCModel内部计算）
+            neighbor_mask: (batch, N) 邻居有效性mask
+        
+        Returns:
+            predictions: (batch, pred_frames, 2, num_modes) 预测轨迹
+        """
+        if not self.using_pretrained:
+            # 使用简化实现
+            social_features = self.social_circle(
+                target_trajectory,
+                neighbor_trajectories,
+                neighbor_angles,
+                neighbor_mask
+            )
+            predictions = self.e_v2_net(social_features)
+            return predictions
+        
+        # 使用预训练EVSCModel
+        batch_size = target_trajectory.size(0)
+        obs_len = target_trajectory.size(1)
+        
+        # 输入长度校验
+        if obs_len != self.obs_frames:
+            raise ValueError(
+                f"输入轨迹长度 ({obs_len}) 与预训练模型期望 ({self.obs_frames}) 不匹配。"
+                f"请检查数据预处理或重新训练模型。"
+            )
+        
+        # 准备输入（EVSCModel格式）
+        # 确保数据在正确的设备上
+        obs = target_trajectory.to(self.device)      # (batch, 8, 2)
+        nei = neighbor_trajectories.to(self.device)  # (batch, N, 8, 2)
+        
+        # 应用邻居mask（屏蔽无效邻居）
+        if neighbor_mask is not None:
+            # mask: (batch, N) -> (batch, N, 1, 1) 用于广播
+            mask_expanded = neighbor_mask.unsqueeze(-1).unsqueeze(-1).to(self.device)
+            nei = nei * mask_expanded  # 无效邻居轨迹置零
+        
+        # EVSCModel推理
+        with torch.no_grad():
+            Y, social_circle, _ = self.evsc_model([obs, nei], training=False)
+        
+        # Y shape: (batch, K*Kc, 3, 2)
+        # K*Kc 个模态，每个模态3个关键点在t=[4,8,11]
+        actual_num_modes = Y.size(1)
+        
+        # 插值：3个关键点 → 12个完整点
+        full_predictions = self._interpolate_keypoints(Y)
+        # 输出: (batch, actual_num_modes, 12, 2)
+        
+        # 调整维度顺序以匹配接口
+        # 从 (batch, num_modes, 12, 2) → (batch, 12, 2, num_modes)
+        predictions = full_predictions.permute(0, 2, 3, 1)
         
         return predictions
 

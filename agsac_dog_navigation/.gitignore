@@ -313,8 +313,22 @@ docker-compose.override.yml
 external/SocialCircle_original/
 external/*/
 
-# 预训练模型权重
-pretrained/social_circle/*.pth
-pretrained/social_circle/*.pt
-pretrained/e_v2_net/*.pth
-pretrained/e_v2_net/*.pt
+# 忽略Project-Monandaeg-SocialCircle文件夹
+Project-Monandaeg-SocialCircle/
+
+# 预训练模型权重目录（整个目录忽略）
+pretrained/social_circle/*/
+pretrained/e_v2_net/*/
+!pretrained/social_circle/README.md
+!pretrained/e_v2_net/README.md
+
+# 但仍然忽略散落的权重文件
+pretrained/**/*.pth
+pretrained/**/*.pt
+pretrained/**/*.bin
+pretrained/**/*.0
+
+# 测试临时输出
+test_output.txt
+test.log
+temp/

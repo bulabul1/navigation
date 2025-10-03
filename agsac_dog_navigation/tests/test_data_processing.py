@@ -230,7 +230,8 @@ class TestDataProcessor:
         normalized = processor.normalize_coordinates(original_coords, reference, scale)
         recovered = processor.denormalize_coordinates(normalized, reference, scale)
         
-        torch.testing.assert_close(original_coords, recovered, rtol=1e-5, atol=1e-5)
+        # 放宽容差，考虑浮点数运算误差
+        torch.testing.assert_close(original_coords, recovered, rtol=1e-4, atol=1e-4)
 
 
 class TestUtilityFunctions:

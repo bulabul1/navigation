@@ -325,31 +325,32 @@ def pad_sequence_list(
     将可变长度的序列列表padding到固定长度
     
     Args:
-        sequences: List[Tensor(...)] 可变长度的序列
+        sequences: List[Tensor(seq_len, ...)] 可变长度的序列列表
         max_length: int 目标长度
         padding_value: float padding值
         
     Returns:
-        Tensor(max_length, ...) padding后的序列
+        Tensor(max_length, num_sequences, ...) padding后的序列
     """
     if len(sequences) == 0:
         raise ValueError("Empty sequence list")
     
-    # 获取序列的形状
-    sample_shape = sequences[0].shape[1:]  # 除第一维外的形状
+    num_sequences = len(sequences)
+    # 获取序列的特征维度
+    feature_shape = sequences[0].shape[1:]  # 除第一维(seq_len)外的形状
     
-    # 创建padding后的张量
+    # 创建padding后的张量 (max_length, num_sequences, *feature_shape)
     padded = torch.full(
-        (max_length,) + sample_shape,
+        (max_length, num_sequences) + feature_shape,
         padding_value,
         dtype=sequences[0].dtype,
         device=sequences[0].device
     )
     
     # 填充实际序列
-    actual_length = min(len(sequences), max_length)
-    for i in range(actual_length):
-        padded[i] = sequences[i]
+    for i, seq in enumerate(sequences):
+        seq_len = min(len(seq), max_length)
+        padded[:seq_len, i] = seq[:seq_len]
     
     return padded
 

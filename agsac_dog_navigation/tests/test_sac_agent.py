@@ -257,7 +257,7 @@ def test_save_load_checkpoint():
         # 验证更新计数相同
         assert agent.total_updates == agent2.total_updates, "更新计数应该相同"
     
-    print("\n✓ Checkpoint保存和加载成功")
+    print("\n[OK] Checkpoint保存和加载成功")
 
 
 def test_train_eval_mode():

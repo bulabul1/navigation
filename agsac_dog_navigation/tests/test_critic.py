@@ -283,7 +283,7 @@ def test_twin_critic_target_network_copy():
     for p1, p2 in zip(twin_critic.parameters(), twin_critic_target.parameters()):
         assert torch.allclose(p1, p2), "Target网络参数应与源网络一致"
     
-    print("\n✓ Target网络拷贝成功")
+    print("\n[OK] Target网络拷贝成功")
 
 
 def test_critic_cuda_compatibility():

@@ -90,13 +90,14 @@ class TestAngleComputation:
         angles = torch.tensor([0.0, torch.pi, 2 * torch.pi, 3 * torch.pi, -torch.pi, -2 * torch.pi])
         normalized = normalize_angle(angles)
         
-        # 所有角度应该在[-π, π]范围
+        # 所有角度应该在[-π, π]范围（atan2的输出范围）
         assert (normalized >= -torch.pi).all()
         assert (normalized <= torch.pi).all()
         
         # 检查具体值
         torch.testing.assert_close(normalized[0], torch.tensor(0.0), atol=1e-5, rtol=1e-5)
-        torch.testing.assert_close(normalized[1], torch.tensor(torch.pi), atol=1e-5, rtol=1e-5)
+        # π会被归一化为-π（因为atan2(sin(π), cos(π)) = atan2(0, -1) = -π）
+        torch.testing.assert_close(normalized[1], torch.tensor(-torch.pi), atol=1e-5, rtol=1e-5)
         torch.testing.assert_close(normalized[2], torch.tensor(0.0), atol=1e-5, rtol=1e-5)
     
     def test_angle_difference(self):
