@@ -43,6 +43,7 @@ class SACAgent(nn.Module):
         tau: float = 0.005,
         auto_entropy: bool = True,
         target_entropy: Optional[float] = None,
+        fixed_alpha: float = 0.2,
         max_grad_norm: float = 1.0,
         device: str = 'cpu'
     ):
@@ -71,6 +72,9 @@ class SACAgent(nn.Module):
         self.auto_entropy = auto_entropy
         self.max_grad_norm = max_grad_norm
         self.device = torch.device(device)
+        
+        # 性能分析标志
+        self._profiled_update = False
         
         # 目标熵（默认为-action_dim）
         if target_entropy is None:
@@ -122,7 +126,7 @@ class SACAgent(nn.Module):
             self.alpha = self.log_alpha.exp()
         else:
             # 固定alpha
-            self.log_alpha = torch.log(torch.tensor(0.2, device=self.device))
+            self.log_alpha = torch.log(torch.tensor(float(fixed_alpha), device=self.device))
             self.alpha = self.log_alpha.exp()
             self.alpha_optimizer = None
         
@@ -171,6 +175,17 @@ class SACAgent(nn.Module):
         Returns:
             logs: dict，包含损失和指标信息
         """
+        import time
+        
+        # 性能分析（只在第一次更新时）
+        enable_profile = not self._profiled_update
+        if enable_profile:
+            self._profiled_update = True
+            print("\n" + "="*70)
+            print("🔍 性能分析: SAC更新内部细节")
+            print("="*70)
+            update_start = time.time()
+        
         # 设置训练模式（修复：确保LSTM可以做backward）
         self.actor.train()
         self.critic.train()
@@ -191,8 +206,9 @@ class SACAgent(nn.Module):
         if self.auto_entropy:
             self.alpha = self.log_alpha.exp()
         
-        # ==================== 1. 更新Critic ====================
-        self.critic_optimizer.zero_grad()
+        # ==================== 1. 计算Critic Loss（不立即backward）====================
+        if enable_profile:
+            critic_forward_start = time.time()
         
         for segment in segment_batch:
             states = segment['states'].to(self.device)  # (seq_len, 64)
@@ -261,16 +277,18 @@ class SACAgent(nn.Module):
         # 平均Critic损失
         critic_loss = total_critic_loss / batch_size
         
-        # 反向传播和梯度裁剪
-        critic_loss.backward()
-        critic_grad_norm = torch.nn.utils.clip_grad_norm_(
-            self.critic.parameters(), self.max_grad_norm
-        )
-        self.critic_optimizer.step()
+        if enable_profile:
+            critic_forward_time = time.time() - critic_forward_start
         
-        # ==================== 2. 更新Actor ====================
-        self.actor_optimizer.zero_grad()
+        # ==================== 2. 计算Actor Loss（不立即backward）====================
+        if enable_profile:
+            actor_forward_start = time.time()
         
+        # 暂时冻结Critic参数，防止Actor损失更新Critic参数（但保留对输入的梯度）
+        critic_requires_grad_backup = [p.requires_grad for p in self.critic.parameters()]
+        for p in self.critic.parameters():
+            p.requires_grad_(False)
+
         for segment in segment_batch:
             states = segment['states'].to(self.device)
             seq_len = states.shape[0]
@@ -304,14 +322,48 @@ class SACAgent(nn.Module):
         # 平均Actor损失
         actor_loss = total_actor_loss / batch_size
         
-        # 反向传播和梯度裁剪
-        actor_loss.backward()
+        # 恢复Critic参数的requires_grad设置
+        for p, rg in zip(self.critic.parameters(), critic_requires_grad_backup):
+            p.requires_grad_(rg)
+
+        if enable_profile:
+            actor_forward_time = time.time() - actor_forward_start
+        
+        # ==================== 3. 组合Loss并统一Backward ====================
+        if enable_profile:
+            backward_start = time.time()
+        
+        # 清空所有梯度
+        self.critic_optimizer.zero_grad()
+        self.actor_optimizer.zero_grad()
+        
+        # 组合loss（累积后一次backward）
+        combined_loss = critic_loss + actor_loss
+        
+        # 统一backward（梯度传播到Critic + Actor + 编码器）
+        combined_loss.backward()
+        
+        # 分别裁剪和更新
+        critic_grad_norm = torch.nn.utils.clip_grad_norm_(
+            self.critic.parameters(), self.max_grad_norm
+        )
         actor_grad_norm = torch.nn.utils.clip_grad_norm_(
             self.actor.parameters(), self.max_grad_norm
         )
+        
+        self.critic_optimizer.step()
         self.actor_optimizer.step()
         
-        # ==================== 3. 更新Alpha（自动熵调节）====================
+        if enable_profile:
+            backward_time = time.time() - backward_start
+            # 合并为一个backward时间
+            critic_backward_time = backward_time
+            actor_backward_time = 0.0  # 已包含在上面
+        
+        # ==================== 4. 更新Alpha（自动熵调节）====================
+        if enable_profile:
+            alpha_start = time.time()
+        
         alpha_loss = torch.tensor(0.0)
         if self.auto_entropy and self.alpha_optimizer is not None:
             self.alpha_optimizer.zero_grad()
@@ -355,8 +407,36 @@ class SACAgent(nn.Module):
         else:
             total_alpha_loss = 0.0
         
-        # ==================== 4. 软更新Target网络 ====================
+        if enable_profile:
+            alpha_time = time.time() - alpha_start if self.auto_entropy else 0
+        
+        # ==================== 5. 软更新Target网络 ====================
+        if enable_profile:
+            target_update_start = time.time()
+        
         self.soft_update_target()
+        
+        if enable_profile:
+            target_update_time = time.time() - target_update_start
+            total_update_time = time.time() - update_start
+            
+            # 输出详细分析
+            print(f"\nBatch大小: {batch_size} segments")
+            print(f"平均Sequence长度: {sum(s['states'].shape[0] for s in segment_batch) / batch_size:.1f}步")
+            print("-"*70)
+            print(f"  1. Critic Forward:     {critic_forward_time*1000:8.2f}ms ({critic_forward_time/total_update_time*100:5.1f}%)")
+            print(f"  2. Actor Forward:      {actor_forward_time*1000:8.2f}ms ({actor_forward_time/total_update_time*100:5.1f}%)")
+            print(f"  3. Combined Backward:  {critic_backward_time*1000:8.2f}ms ({critic_backward_time/total_update_time*100:5.1f}%)")
+            print(f"     (Critic+Actor梯度一次传播)")
+            print(f"  4. Alpha更新:          {alpha_time*1000:8.2f}ms ({alpha_time/total_update_time*100:5.1f}%)")
+            print(f"  5. Target网络更新:    {target_update_time*1000:8.2f}ms ({target_update_time/total_update_time*100:5.1f}%)")
+            print("-"*70)
+            print(f"  总计:                  {total_update_time*1000:8.2f}ms")
+            print("\n💡 方案B特点:")
+            print("  - Critic和Actor loss组合后统一backward")
+            print("  - 编码器梯度 = Critic梯度 + Actor梯度 (multi-task)")
+            print("  - 不需要retain_graph，节省显存")
+            print("="*70 + "\n")
         
         # 更新计数
         self.total_updates += 1

@@ -1,0 +1,64 @@
+# 恢复训练配置 - 微调版本
+# 基于专家建议的三项优化
+
+mode: curriculum
+device: cuda
+seed: null
+
+env:
+  max_pedestrians: 10
+  max_corridors: 10
+  max_vertices: 20
+  obs_horizon: 8
+  pred_horizon: 12
+  max_episode_steps: 120             # 降低至120，减少无效探索
+  use_geometric_reward: true
+  use_corridor_generator: true
+  curriculum_learning: false         # 禁用课程学习，固定easy难度
+  scenario_seed: null
+  device: cuda
+  corridor_constraint_mode: soft    # 固定soft约束（easy难度）
+  
+  # ===== 优化1: 奖励与约束平衡 =====
+  corridor_penalty_weight: 8.0       # 固定权重8.0（easy难度）
+  corridor_penalty_cap: 12.0         # 降低上限至12（从30）
+  
+  # ===== 优化2: 进展奖励 =====
+  progress_reward_weight: 20.0       # 恢复至20（从15），增强正向信号
+  step_penalty_weight: 0.02          # 保持0.02，稳定后降回0.01
+  
+  # ===== 优化2: 步长限幅 =====
+  enable_step_limit: true            # 启用步长限幅，防止超冲
+
+model:
+  action_dim: 22
+  hidden_dim: 128
+  num_modes: 3
+  auto_entropy: false
+  max_pedestrians: 10
+  max_corridors: 10
+  max_vertices: 20
+  obs_horizon: 8
+  pred_horizon: 12
+  use_pretrained_predictor: true
+  pretrained_weights_path: "external/SocialCircle_original/weights/SocialCircle/evsczara1"
+  device: cuda
+
+training:
+  episodes: 500
+  warmup_episodes: 10             # 增加至10，让编码器有更多初始样本学习
+  updates_per_episode: 5          # 增加至5（平衡速度与学习效果）
+  buffer_capacity: 10000
+  seq_len: 8                      # 降至8，让短episode也能用于训练
+  batch_size: 8                   # 保持8（加速重编码）
+  actor_lr: 0.00005              # Actor学习率（降低50%防止策略崩溃）
+  critic_lr: 0.00005             # Critic学习率（降低50%）
+  encoder_lr: 0.000025           # 编码器学习率（0.5x critic_lr）
+  gamma: 0.99
+  tau: 0.005
+  alpha: 0.2
+  log_interval: 10
+  save_interval: 50
+  eval_interval: 25              # 降低至25（从50），更频繁评估
+  use_tensorboard: true
+  experiment_name: resume_training_optimized

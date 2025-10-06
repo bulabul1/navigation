@@ -219,13 +219,16 @@ class PretrainedTrajectoryPredictor(TrajectoryPredictorInterface):
         self,
         weights_path: Union[str, Path],
         freeze: bool = True,
-        fallback_to_simple: bool = True
+        fallback_to_simple: bool = True,
+        device: Optional[str] = None
     ):
         super().__init__()
         
         # 转换为绝对路径
         self.weights_path = Path(weights_path).absolute()
         self.freeze = freeze
+        # 期望的输出设备（与主模型保持一致）
+        self.output_device = torch.device(device) if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # 尝试加载预训练模型
         try:
@@ -280,8 +283,9 @@ class PretrainedTrajectoryPredictor(TrajectoryPredictorInterface):
             print(f"[INFO] 正在加载模型...")
             print(f"  - 权重路径: {self.weights_path}")
             
-            # 检查GPU是否可用
-            gpu_id = '0' if torch.cuda.is_available() else '-1'
+            # 根据期望设备选择GPU/CPU
+            use_cuda = (self.output_device.type == 'cuda') and torch.cuda.is_available()
+            gpu_id = '0' if use_cuda else '-1'
             print(f"  - 使用设备: {'GPU' if gpu_id == '0' else 'CPU'}")
             
             structure = main(
@@ -308,7 +312,10 @@ class PretrainedTrajectoryPredictor(TrajectoryPredictorInterface):
             # 保存模型对象和设备信息
             self.evsc_model = structure.model
             self.evsc_model.eval()
-            self.device = structure.device  # 保存设备信息
+            # EVSC内部实际运行设备
+            self.evsc_device = structure.device
+            # 统一对外设备为期望设备（与主模型一致）
+            self.device = self.output_device
             
             print(f"[INFO] 模型设备: {self.device}")
             
@@ -343,8 +350,8 @@ class PretrainedTrajectoryPredictor(TrajectoryPredictorInterface):
         simple_predictor = SimpleTrajectoryPredictor()
         self.social_circle = simple_predictor.social_circle
         self.e_v2_net = simple_predictor.e_v2_net
-        # 设置默认设备
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # 设置设备（对齐主模型）
+        self.device = self.output_device
     
     def _interpolate_keypoints(self, keypoints: torch.Tensor) -> torch.Tensor:
         """
@@ -434,9 +441,10 @@ class PretrainedTrajectoryPredictor(TrajectoryPredictorInterface):
             )
         
         # 准备输入（EVSCModel格式）
-        # 确保数据在正确的设备上
-        obs = target_trajectory.to(self.device)      # (batch, 8, 2)
-        nei = neighbor_trajectories.to(self.device)  # (batch, N, 8, 2)
+        # 确保数据在EVSC模型设备上推理
+        evsc_device = getattr(self, 'evsc_device', self.device)
+        obs = target_trajectory.to(evsc_device)      # (batch, 8, 2)
+        nei = neighbor_trajectories.to(evsc_device)  # (batch, N, 8, 2)
         
         # 应用邻居mask（屏蔽无效邻居）
         if neighbor_mask is not None:
@@ -460,6 +468,8 @@ class PretrainedTrajectoryPredictor(TrajectoryPredictorInterface):
         # 从 (batch, num_modes, 12, 2) → (batch, 12, 2, num_modes)
         predictions = full_predictions.permute(0, 2, 3, 1)
         
+        # 将输出迁移到对外设备（与主模型一致）
+        predictions = predictions.to(self.output_device)
         return predictions
 
 

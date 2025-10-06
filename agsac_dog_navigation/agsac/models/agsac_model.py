@@ -6,6 +6,7 @@ AGSAC主模型类
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 from typing import Dict, List, Tuple, Optional
 import os
 
@@ -91,7 +92,9 @@ class AGSACModel(nn.Module):
         # SAC配置
         actor_lr: float = 1e-4,
         critic_lr: float = 1e-4,
+        encoder_lr: Optional[float] = None,  # 编码器学习率，None则使用critic_lr
         alpha_lr: float = 3e-4,
+        alpha: float = 0.2,
         gamma: float = 0.99,
         tau: float = 0.005,
         auto_entropy: bool = True,
@@ -125,6 +128,7 @@ class AGSACModel(nn.Module):
             actor_lr: Actor学习率
             critic_lr: Critic学习率
             alpha_lr: 熵系数学习率
+            alpha: 固定熵系数（当auto_entropy=False时生效）
             gamma: 折扣因子
             tau: 软更新系数
             auto_entropy: 是否自动调节熵系数
@@ -190,7 +194,8 @@ class AGSACModel(nn.Module):
             predictor_type='pretrained',
             weights_path=pretrained_weights_path,
             freeze=True,
-            fallback_to_simple=False  # 不允许回退到简化版
+            fallback_to_simple=False,  # 不允许回退到简化版
+            device=device
         )
         
         # ==================== 3. 行人编码层 ====================
@@ -231,9 +236,25 @@ class AGSACModel(nn.Module):
             tau=tau,
             auto_entropy=auto_entropy,
             target_entropy=target_entropy,
+            fixed_alpha=alpha,
             max_grad_norm=max_grad_norm,
             device=device
         )
+        
+        # ==================== 编码器优化器 ====================
+        # 收集所有编码器和fusion的参数
+        encoder_params = []
+        encoder_params.extend(self.dog_encoder.parameters())
+        encoder_params.extend(self.pointnet.parameters())
+        encoder_params.extend(self.corridor_encoder.parameters())
+        encoder_params.extend(self.pedestrian_encoder.parameters())
+        encoder_params.extend(self.fusion.parameters())
+        # 注意：trajectory_predictor已冻结，不包含
+        
+        # 创建编码器优化器（独立学习率或与critic同步）
+        actual_encoder_lr = encoder_lr if encoder_lr is not None else critic_lr
+        self.encoder_optimizer = optim.Adam(encoder_params, lr=actual_encoder_lr)
+        print(f"[Model] 编码器优化器创建：{sum(p.numel() for p in encoder_params):,} 参数, lr={actual_encoder_lr}")
         
         # ==================== 6. 评估层（GDE） ====================
         
@@ -446,6 +467,22 @@ class AGSACModel(nn.Module):
         
         # Stack: (batch, max_peds, pred_horizon, 2, num_modes)
         pedestrian_predictions = torch.stack(pedestrian_predictions_list, dim=1)
+        
+        # 可选：将EVSC输出的模态数下采样到配置的期望数量（例如3），以加速后续编码
+        actual_num_modes = pedestrian_predictions.shape[-1]
+        desired_num_modes = getattr(self.pedestrian_encoder, 'num_modes', actual_num_modes)
+        if actual_num_modes > desired_num_modes:
+            # 均匀选取desired_num_modes个索引（保持覆盖不同风格）
+            indices = torch.linspace(0, actual_num_modes - 1, desired_num_modes, device=pedestrian_predictions.device)
+            indices = torch.round(indices).long().unique()
+            # 如果由于unique导致数量减少，补齐到期望数量
+            if indices.numel() < desired_num_modes:
+                last_idx = indices[-1].item() if indices.numel() > 0 else 0
+                pad = torch.arange(last_idx, last_idx + (desired_num_modes - indices.numel()), device=indices.device)
+                pad = torch.clamp(pad, max=actual_num_modes - 1)
+                indices = torch.cat([indices, pad.long()])[:desired_num_modes]
+            pedestrian_predictions = torch.index_select(pedestrian_predictions, dim=-1, index=indices)
+        
         debug_info['pedestrian_predictions'] = pedestrian_predictions
         
         # ==================== 3. 行人编码 ====================
@@ -512,6 +549,169 @@ class AGSACModel(nn.Module):
             'debug_info': debug_info
         }
     
+    def encode_from_obs(self, observation: Dict) -> torch.Tensor:
+        """
+        从观测编码到fused_state（仅编码，不做决策）
+        用于训练时重新编码，使编码器参与梯度传播
+        
+        Args:
+            observation: 观测字典（格式同forward）
+        
+        Returns:
+            fused_state: (batch, fusion_dim) 融合后的状态特征
+        """
+        # ==================== 1. 感知编码 ====================
+        
+        # 1.1 编码机器狗状态
+        dog_features = self.dog_encoder(
+            past_trajectory=observation['dog']['trajectory'],
+            current_velocity=observation['dog']['velocity'],
+            current_position=observation['dog']['position'],
+            goal_position=observation['dog']['goal']
+        )
+        
+        # 1.2 编码走廊几何
+        corridor_features = self.encode_corridors(
+            corridor_polygons=observation['corridors']['polygons'],
+            corridor_vertex_counts=observation['corridors']['vertex_counts'],
+            corridor_mask=observation['corridors']['mask']
+        )
+        
+        # ==================== 2. 轨迹预测 ====================
+        
+        batch_size = observation['dog']['trajectory'].shape[0]
+        max_peds = observation['pedestrians']['trajectories'].shape[1]
+        pedestrian_predictions_list = []
+        
+        for i in range(max_peds):
+            target_traj = observation['pedestrians']['trajectories'][:, i, :, :]
+            neighbor_indices = [j for j in range(max_peds) if j != i]
+            
+            if len(neighbor_indices) > 0:
+                neighbor_trajs = observation['pedestrians']['trajectories'][:, neighbor_indices, :, :]
+                neighbor_mask = observation['pedestrians']['mask'][:, neighbor_indices]
+                target_pos = target_traj[:, -1, :]
+                neighbor_pos = neighbor_trajs[:, :, -1, :]
+                relative_vec = neighbor_pos - target_pos.unsqueeze(1)
+                neighbor_angles = torch.atan2(relative_vec[:, :, 1], relative_vec[:, :, 0])
+            else:
+                neighbor_trajs = torch.zeros(batch_size, 0, observation['pedestrians']['trajectories'].shape[2], 2, device=self.device)
+                neighbor_angles = torch.zeros(batch_size, 0, device=self.device)
+                neighbor_mask = torch.zeros(batch_size, 0, device=self.device)
+            
+            # 预测（预训练模型，无梯度）
+            with torch.no_grad():
+                pred = self.trajectory_predictor(
+                    target_trajectory=target_traj,
+                    neighbor_trajectories=neighbor_trajs,
+                    neighbor_angles=neighbor_angles,
+                    neighbor_mask=neighbor_mask
+                )
+            pedestrian_predictions_list.append(pred)
+        
+        pedestrian_predictions = torch.stack(pedestrian_predictions_list, dim=1)
+        
+        # 下采样模态数（如果需要）
+        actual_num_modes = pedestrian_predictions.shape[-1]
+        desired_num_modes = getattr(self.pedestrian_encoder, 'num_modes', actual_num_modes)
+        if actual_num_modes > desired_num_modes:
+            indices = torch.linspace(0, actual_num_modes - 1, desired_num_modes, device=pedestrian_predictions.device)
+            indices = torch.round(indices).long().unique()
+            if indices.numel() < desired_num_modes:
+                last_idx = indices[-1].item() if indices.numel() > 0 else 0
+                pad = torch.arange(last_idx, last_idx + (desired_num_modes - indices.numel()), device=indices.device)
+                pad = torch.clamp(pad, max=actual_num_modes - 1)
+                indices = torch.cat([indices, pad.long()])[:desired_num_modes]
+            pedestrian_predictions = torch.index_select(pedestrian_predictions, dim=-1, index=indices)
+        
+        # ==================== 3. 行人编码 ====================
+        
+        pedestrian_features = self.pedestrian_encoder(
+            pedestrian_predictions=pedestrian_predictions,
+            pedestrian_mask=observation['pedestrians']['mask']
+        )
+        
+        # ==================== 4. 多模态融合 ====================
+        
+        fused_state, _ = self.fusion(
+            dog_features=dog_features,
+            pedestrian_features=pedestrian_features,
+            corridor_features=corridor_features,
+            return_attention_weights=False
+        )
+        
+        return fused_state
+    
+    def encode_batch(self, observations: List[Dict]) -> torch.Tensor:
+        """
+        批量编码observations（用于训练）
+        
+        Args:
+            observations: List of observation dicts (length = batch_size)
+        
+        Returns:
+            fused_states: (batch_size, fusion_dim)
+        """
+        # Stack所有observations为单个batch
+        batch_obs = self._stack_observations(observations)
+        
+        # 调用encode_from_obs
+        fused_states = self.encode_from_obs(batch_obs)
+        
+        return fused_states
+    
+    def _stack_observations(self, observations: List[Dict]) -> Dict:
+        """
+        将observation列表stack成batch
+        
+        Args:
+            observations: List of obs dicts (每个可能有batch维度(1, ...)或无)
+        
+        Returns:
+            batched_obs: 单个batch的observation dict
+        """
+        batch_size = len(observations)
+        
+        # 辅助函数：处理可能的batch维度
+        def squeeze_if_batched(tensor):
+            """如果tensor有batch维度(1, ...)，squeeze掉"""
+            if tensor.dim() > 0 and tensor.size(0) == 1:
+                return tensor.squeeze(0)
+            return tensor
+        
+        # Stack dog observations
+        dog_trajectories = torch.stack([squeeze_if_batched(obs['dog']['trajectory']) for obs in observations], dim=0)
+        dog_velocities = torch.stack([squeeze_if_batched(obs['dog']['velocity']) for obs in observations], dim=0)
+        dog_positions = torch.stack([squeeze_if_batched(obs['dog']['position']) for obs in observations], dim=0)
+        dog_goals = torch.stack([squeeze_if_batched(obs['dog']['goal']) for obs in observations], dim=0)
+        
+        # Stack pedestrian observations
+        ped_trajectories = torch.stack([squeeze_if_batched(obs['pedestrians']['trajectories']) for obs in observations], dim=0)
+        ped_masks = torch.stack([squeeze_if_batched(obs['pedestrians']['mask']) for obs in observations], dim=0)
+        
+        # Stack corridor observations
+        corridor_polygons = torch.stack([squeeze_if_batched(obs['corridors']['polygons']) for obs in observations], dim=0)
+        corridor_vertex_counts = torch.stack([squeeze_if_batched(obs['corridors']['vertex_counts']) for obs in observations], dim=0)
+        corridor_masks = torch.stack([squeeze_if_batched(obs['corridors']['mask']) for obs in observations], dim=0)
+        
+        return {
+            'dog': {
+                'trajectory': dog_trajectories,
+                'velocity': dog_velocities,
+                'position': dog_positions,
+                'goal': dog_goals
+            },
+            'pedestrians': {
+                'trajectories': ped_trajectories,
+                'mask': ped_masks
+            },
+            'corridors': {
+                'polygons': corridor_polygons,
+                'vertex_counts': corridor_vertex_counts,
+                'mask': corridor_masks
+            }
+        }
+    
     def select_action(
         self,
         observation: Dict,
@@ -570,6 +770,10 @@ class AGSACModel(nn.Module):
             'sac_critic_optimizer': self.sac_agent.critic_optimizer.state_dict(),
         }
         
+        # 保存编码器优化器
+        if hasattr(self, 'encoder_optimizer'):
+            checkpoint['encoder_optimizer'] = self.encoder_optimizer.state_dict()
+        
         if self.sac_agent.auto_entropy:
             checkpoint['sac_alpha_optimizer'] = self.sac_agent.alpha_optimizer.state_dict()
             checkpoint['log_alpha'] = self.sac_agent.log_alpha.item()
@@ -592,6 +796,10 @@ class AGSACModel(nn.Module):
         if load_optimizers:
             self.sac_agent.actor_optimizer.load_state_dict(checkpoint['sac_actor_optimizer'])
             self.sac_agent.critic_optimizer.load_state_dict(checkpoint['sac_critic_optimizer'])
+            
+            # 加载编码器优化器
+            if hasattr(self, 'encoder_optimizer') and 'encoder_optimizer' in checkpoint:
+                self.encoder_optimizer.load_state_dict(checkpoint['encoder_optimizer'])
             
             if self.sac_agent.auto_entropy and 'sac_alpha_optimizer' in checkpoint:
                 self.sac_agent.alpha_optimizer.load_state_dict(checkpoint['sac_alpha_optimizer'])

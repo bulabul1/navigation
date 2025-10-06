@@ -404,43 +404,25 @@ class AGSACEnvironment(ABC):
         """
         计算总奖励
         
+        注意：DummyAGSACEnvironment已在_compute_base_reward中完整实现了
+        所有奖励组件（progress, GDE, collision, step等），这里直接返回
+        避免双重计分。
+        
         Args:
             action: 执行的动作
             collision: 是否碰撞
         
         Returns:
             total_reward: 总奖励
-            reward_info: 奖励详情
+            reward_info: 奖励详情（包含所有分量）
         """
-        # 基础奖励（由子类实现）
-        base_reward = self._compute_base_reward(action, collision)
+        # 子类已完整实现所有奖励，直接使用
+        total_reward, reward_components = self._compute_base_reward(action, collision)
         
-        # 几何奖励（可选）
-        geometric_reward = 0.0
-        if self.use_geometric_reward and len(self.path_history) >= 2:
-            geometric_reward = self._compute_geometric_reward()
-        
-        # 碰撞惩罚
-        collision_penalty = self.reward_weights['collision'] if collision else 0.0
-        
-        # 步数惩罚（鼓励快速完成）
-        step_penalty = self.reward_weights['step_penalty']
-        
-        # 总奖励
-        total_reward = (
-            base_reward +
-            self.reward_weights['geometric'] * geometric_reward +
-            collision_penalty +
-            step_penalty
-        )
-        
-        # 详情
+        # 详情（包含所有奖励分量，用于日志和调试）
         reward_info = {
-            'base_reward': base_reward,
-            'geometric_reward': geometric_reward,
-            'collision_penalty': collision_penalty,
-            'step_penalty': step_penalty,
-            'total_reward': total_reward
+            'total_reward': total_reward,
+            **reward_components  # 展开所有奖励分量
         }
         
         return total_reward, reward_info
@@ -504,8 +486,14 @@ class AGSACEnvironment(ABC):
         goal_pos = np.array(raw_obs['goal'])
         distance_to_goal = np.linalg.norm(robot_pos - goal_pos)
         
-        if distance_to_goal < 0.5:  # 阈值可配置
+        if distance_to_goal < 1.0:  # 阈值与奖励函数一致
             return True, 'goal_reached'
+        
+        # 提前终止：连续严重违规corridor约束
+        # 如果连续20步都在corridor外且距离>1.0，视为无效探索，提前终止
+        if (hasattr(self, 'consecutive_violations') and 
+            self.consecutive_violations >= self.consecutive_violation_threshold):
+            return True, 'corridor_violation'
         
         return False, 'running'
     
@@ -544,6 +532,12 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         use_corridor_generator: bool = False,
         curriculum_learning: bool = False,
         scenario_seed: Optional[int] = None,
+        corridor_constraint_mode: str = 'soft',  # 新增：'soft', 'medium', 'hard'
+        corridor_penalty_weight: float = 10.0,   # 新增：软约束惩罚权重
+        corridor_penalty_cap: float = 30.0,      # 新增：corridor惩罚上限（每步）
+        progress_reward_weight: float = 20.0,    # 新增：可配置进展奖励权重
+        step_penalty_weight: float = 0.01,       # 新增：可配置步数惩罚权重
+        enable_step_limit: bool = True,          # 新增：是否启用步长限幅
         **kwargs
     ):
         """
@@ -551,6 +545,15 @@ class DummyAGSACEnvironment(AGSACEnvironment):
             use_corridor_generator: 是否使用自动场景生成器（默认False，使用固定场景）
             curriculum_learning: 是否启用课程学习（从easy到hard）
             scenario_seed: 场景生成的随机种子
+            corridor_constraint_mode: Corridor约束模式
+                - 'soft': 软约束，偏离惩罚（适合训练初期）
+                - 'medium': 中等约束，更大惩罚（适合训练中期）
+                - 'hard': 硬约束，离开即碰撞（适合训练后期）
+            corridor_penalty_weight: 软约束惩罚权重（分/米）
+            corridor_penalty_cap: corridor惩罚上限（每步最多扣多少分）
+            progress_reward_weight: 进展奖励权重（默认20.0）
+            step_penalty_weight: 步数惩罚权重（默认0.01）
+            enable_step_limit: 是否启用步长限幅（防止超冲）
         """
         super().__init__(**kwargs)
         
@@ -559,13 +562,34 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         self.curriculum_learning = curriculum_learning
         self.scenario_seed = scenario_seed
         
+        # Corridor约束配置
+        self.corridor_constraint_mode = corridor_constraint_mode
+        self.corridor_penalty_weight = corridor_penalty_weight
+        self.corridor_penalty_cap = corridor_penalty_cap
+        
+        # 奖励权重配置（可调节）
+        self.progress_reward_weight = progress_reward_weight
+        self.step_penalty_weight = step_penalty_weight
+        
+        # 运动控制配置
+        self.enable_step_limit = enable_step_limit
+        
+        # Corridor violation统计
+        self.corridor_violations = 0
+        self.corridor_violation_distances = []
+        self.consecutive_violations = 0  # 连续违规计数
+        self.consecutive_violation_threshold = 20  # 连续违规20步提前终止
+        
+        # Corridor边界框缓存（性能优化）
+        self.corridor_bboxes = []  # 存储每个corridor的边界框
+        
         if self.use_corridor_generator:
             self.corridor_generator = CorridorGenerator(
                 map_size=(12.0, 12.0),
                 seed=scenario_seed
             )
-            # 课程学习：初始难度
-            self.current_difficulty = 'easy' if curriculum_learning else 'medium'
+            # 课程学习：初始难度（如果禁用课程学习，固定使用easy）
+            self.current_difficulty = 'easy' if curriculum_learning else 'easy'
             self.episode_count = 0
         
         # 环境参数（默认固定场景）
@@ -610,19 +634,43 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         # 重置距离记录（用于计算进展奖励）
         self.last_distance = np.linalg.norm(self.goal_pos - self.start_pos)
         
+        # 重置corridor violation统计
+        self.corridor_violations = 0
+        self.corridor_violation_distances = []
+        self.consecutive_violations = 0  # 重置连续违规计数
+        
         return {}
     
     def _generate_dynamic_scenario(self):
         """使用生成器动态生成场景（带课程学习）"""
         
-        # 课程学习：根据episode数量调整难度
+        # 课程学习：根据episode数量调整难度和约束模式
         if self.curriculum_learning:
+            # 难度渐进
             if self.episode_count < 50:
                 self.current_difficulty = 'easy'
             elif self.episode_count < 150:
                 self.current_difficulty = 'medium'
             else:
                 self.current_difficulty = 'hard'
+            
+            # Corridor约束渐进：soft → medium → hard
+            if self.episode_count < 100:
+                self.corridor_constraint_mode = 'soft'
+            elif self.episode_count < 300:
+                self.corridor_constraint_mode = 'medium'
+            else:
+                self.corridor_constraint_mode = 'hard'
+            
+            # Corridor惩罚权重渐进递增（每100 episodes +2，最多到15）
+            base_weight = 8.0  # 初始权重
+            increment_per_100 = 2.0
+            max_weight = 15.0
+            increments = min(self.episode_count // 100, 3)  # 最多3次递增
+            self.corridor_penalty_weight = min(
+                base_weight + increments * increment_per_100,
+                max_weight
+            )
         
         # 生成场景
         scenario = self.corridor_generator.generate_scenario(
@@ -634,6 +682,18 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         self.goal_pos = scenario['goal']
         self.corridor_data = scenario['corridors']
         self.static_obstacle = scenario['obstacles'] if scenario['obstacles'] else None
+        
+        # 预计算corridor边界框（性能优化）
+        self._compute_corridor_bboxes()
+        
+        # 验证起点和终点是否在corridor内（诊断）
+        if self.corridor_data:
+            start_in = self._is_in_any_corridor(self.start_pos)
+            goal_in = self._is_in_any_corridor(self.goal_pos)
+            if not start_in:
+                print(f"  ⚠️ [警告] 起点不在corridor内! 起点: ({self.start_pos[0]:.2f}, {self.start_pos[1]:.2f})")
+            if not goal_in:
+                print(f"  ⚠️ [警告] 终点不在corridor内! 终点: ({self.goal_pos[0]:.2f}, {self.goal_pos[1]:.2f})")
         
         # 更新行人数量和位置（在corridor内随机生成）
         self.num_pedestrians = min(
@@ -701,9 +761,12 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         self.static_obstacle = np.array([
             [4.0, 3.0], [6.0, 3.0], [6.0, 7.0], [4.0, 7.0]
         ])
+        
+        # 预计算corridor边界框（性能优化）
+        self._compute_corridor_bboxes()
     
     def _generate_pedestrian_positions(self, num_pedestrians: int) -> List[Dict]:
-        """在corridor内随机生成行人初始位置"""
+        """在corridor内随机生成行人初始位置（确保与起点有安全距离）"""
         pedestrians = []
         
         # 在第一条corridor内随机选择位置
@@ -713,14 +776,42 @@ class DummyAGSACEnvironment(AGSACEnvironment):
             min_y, max_y = corridor[:, 1].min(), corridor[:, 1].max()
             
             for i in range(num_pedestrians):
-                # 随机位置
-                x = np.random.uniform(min_x + 1, max_x - 1)
-                y = np.random.uniform(min_y + 1, max_y - 1)
+                # 随机位置（重试机制确保与起点、终点和其他行人保持安全距离）
+                min_safe_distance = 2.5  # 与起点/终点的最小安全距离（米）← 增加到2.5米
+                max_attempts = 50
                 
-                pedestrians.append({
-                    'id': i,
-                    'trajectory': [[x, y]]
-                })
+                for attempt in range(max_attempts):
+                    x = np.random.uniform(min_x + 1, max_x - 1)
+                    y = np.random.uniform(min_y + 1, max_y - 1)
+                    pos = np.array([x, y])
+                    
+                    # 检查与起点的距离
+                    dist_to_start = np.linalg.norm(pos - self.start_pos)
+                    # 检查与终点的距离
+                    dist_to_goal = np.linalg.norm(pos - self.goal_pos)
+                    # 检查与已有行人的距离
+                    too_close_to_others = False
+                    for ped in pedestrians:
+                        other_pos = np.array(ped['trajectory'][-1])
+                        if np.linalg.norm(pos - other_pos) < 1.0:  # 行人之间至少1米
+                            too_close_to_others = True
+                            break
+                    
+                    # 如果位置合法，接受
+                    if dist_to_start >= min_safe_distance and dist_to_goal >= min_safe_distance and not too_close_to_others:
+                        pedestrians.append({
+                            'id': i,
+                            'trajectory': [[x, y]]
+                        })
+                        break
+                else:
+                    # 重试失败，使用备选位置（corridor中心偏移）
+                    center_x = (min_x + max_x) / 2 + np.random.uniform(-2, 2)
+                    center_y = (min_y + max_y) / 2 + np.random.uniform(-2, 2)
+                    pedestrians.append({
+                        'id': i,
+                        'trajectory': [[center_x, center_y]]
+                    })
         
         return pedestrians
     
@@ -752,10 +843,22 @@ class DummyAGSACEnvironment(AGSACEnvironment):
             direction_norm = np.linalg.norm(direction)
             if direction_norm > 1e-6:
                 direction = direction / direction_norm
-            # 以固定速度朝目标移动
-            speed = 0.5  # m/s
+            
+            # 以固定速度朝目标移动（带步长限幅）
+            speed = 1.5  # m/s （提高3倍速度：1.5 * 0.1 = 0.15米/步）
             dt = 0.1     # s
-            displacement = direction * speed * dt
+            max_displacement = speed * dt  # 最大移动距离
+            
+            # 步长限幅：防止超冲和抖动
+            if self.enable_step_limit:
+                # 到第一个路径点的剩余距离（修正：基于首点而非最终目标）
+                remaining_distance = np.linalg.norm(target_point - self.robot_position)
+                # 限制位移不超过到首点的距离
+                actual_displacement = min(max_displacement, remaining_distance)
+            else:
+                actual_displacement = max_displacement
+            
+            displacement = direction * actual_displacement
         elif len(action) == 2:
             # 兼容旧版：直接位移
             dx = action[0] * 0.1
@@ -807,19 +910,185 @@ class DummyAGSACEnvironment(AGSACEnvironment):
             ]
         }
     
+    def _compute_corridor_bboxes(self):
+        """
+        预计算所有corridor的边界框（性能优化）
+        边界框用于快速筛选，避免对每个点都做复杂的polygon检查
+        """
+        self.corridor_bboxes = []
+        for corridor in self.corridor_data:
+            if len(corridor) > 0:
+                min_x = np.min(corridor[:, 0])
+                max_x = np.max(corridor[:, 0])
+                min_y = np.min(corridor[:, 1])
+                max_y = np.max(corridor[:, 1])
+                self.corridor_bboxes.append((min_x, max_x, min_y, max_y))
+            else:
+                self.corridor_bboxes.append(None)
+    
+    def _point_in_bbox(self, point: np.ndarray, bbox: tuple) -> bool:
+        """
+        快速检查点是否在边界框内
+        
+        Args:
+            point: (2,) 点坐标
+            bbox: (min_x, max_x, min_y, max_y)
+        
+        Returns:
+            inside: True if point is inside bbox
+        """
+        if bbox is None:
+            return False
+        min_x, max_x, min_y, max_y = bbox
+        x, y = point
+        return min_x <= x <= max_x and min_y <= y <= max_y
+    
+    def _point_in_polygon(self, point: np.ndarray, polygon: np.ndarray) -> bool:
+        """
+        判断点是否在多边形内（射线法）
+        
+        Args:
+            point: (2,) 点坐标 [x, y]
+            polygon: (n, 2) 多边形顶点
+        
+        Returns:
+            inside: True if point is inside polygon
+        """
+        x, y = point
+        n = len(polygon)
+        inside = False
+        
+        j = n - 1
+        for i in range(n):
+            xi, yi = polygon[i]
+            xj, yj = polygon[j]
+            
+            # 射线与边相交判断
+            if ((yi > y) != (yj > y)) and \
+               (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+                inside = not inside
+            
+            j = i
+        
+        return inside
+    
+    def _is_in_any_corridor(self, point: np.ndarray) -> bool:
+        """
+        检测点是否在任意corridor内（性能优化：先用bbox筛选）
+        
+        Args:
+            point: (2,) 点坐标
+        
+        Returns:
+            in_corridor: True if in any corridor
+        """
+        for i, corridor in enumerate(self.corridor_data):
+            # 性能优化：先用边界框快速筛选
+            if i < len(self.corridor_bboxes) and self.corridor_bboxes[i] is not None:
+                if not self._point_in_bbox(point, self.corridor_bboxes[i]):
+                    continue  # 不在bbox内，直接跳过
+            
+            # 在bbox内，才做精确的polygon检查
+            if self._point_in_polygon(point, corridor):
+                return True
+        return False
+    
+    def _distance_to_nearest_corridor(self, point: np.ndarray) -> float:
+        """
+        计算点到最近corridor边界的距离
+        
+        Args:
+            point: (2,) 点坐标
+        
+        Returns:
+            min_distance: 到最近corridor边界的距离（米）
+        """
+        if not self.corridor_data:
+            return 0.0
+        
+        min_dist = float('inf')
+        
+        for corridor in self.corridor_data:
+            # 如果在corridor内，距离为0
+            if self._point_in_polygon(point, corridor):
+                return 0.0
+            
+            # 否则计算到每条边的距离
+            for i in range(len(corridor)):
+                j = (i + 1) % len(corridor)
+                edge_start = corridor[i]
+                edge_end = corridor[j]
+                
+                # 点到线段的距离
+                dist = self._point_to_segment_distance(point, edge_start, edge_end)
+                min_dist = min(min_dist, dist)
+        
+        return min_dist
+    
+    def _point_to_segment_distance(
+        self, 
+        point: np.ndarray, 
+        seg_start: np.ndarray, 
+        seg_end: np.ndarray
+    ) -> float:
+        """
+        计算点到线段的最短距离
+        
+        Args:
+            point: 点坐标
+            seg_start: 线段起点
+            seg_end: 线段终点
+        
+        Returns:
+            distance: 最短距离
+        """
+        # 线段向量
+        seg_vec = seg_end - seg_start
+        seg_len_sq = np.dot(seg_vec, seg_vec)
+        
+        if seg_len_sq < 1e-8:
+            # 退化为点
+            return np.linalg.norm(point - seg_start)
+        
+        # 投影参数 t
+        t = np.dot(point - seg_start, seg_vec) / seg_len_sq
+        t = np.clip(t, 0.0, 1.0)
+        
+        # 线段上最近点
+        nearest_point = seg_start + t * seg_vec
+        
+        return np.linalg.norm(point - nearest_point)
+    
     def _check_collision(self) -> bool:
-        """碰撞检测（简化）"""
+        """碰撞检测（含corridor约束）"""
         # 边界检测（更宽松的边界）
         if np.any(self.robot_position < -5.0) or np.any(self.robot_position > 15.0):
+            # 诊断日志：边界碰撞
+            if self.current_step <= 1:  # 仅第一步输出
+                print(f"  [碰撞] 边界碰撞! 位置: ({self.robot_position[0]:.2f}, {self.robot_position[1]:.2f})")
             return True
         
         # 行人碰撞检测（简化：距离阈值）
-        for ped in self.pedestrian_trajectories:
+        for i, ped in enumerate(self.pedestrian_trajectories):
             if len(ped['trajectory']) > 0:
                 ped_pos = np.array(ped['trajectory'][-1])
                 dist = np.linalg.norm(self.robot_position - ped_pos)
-                if dist < 0.3:  # 碰撞阈值（更小的阈值）
+                if dist < 0.2:  # 碰撞阈值（从0.3降到0.25，更宽容）
+                    # 诊断日志：行人碰撞
+                    if self.current_step <= 1:  # 仅第一步输出
+                        print(f"  [碰撞] 行人碰撞! 行人{i}距离: {dist:.3f}m < 0.2m")
+                        print(f"       机器人: ({self.robot_position[0]:.2f}, {self.robot_position[1]:.2f})")
+                        print(f"       行人{i}: ({ped_pos[0]:.2f}, {ped_pos[1]:.2f})")
                     return True
+        
+        # Corridor约束检测（课程学习）
+        if hasattr(self, 'corridor_constraint_mode') and \
+           self.corridor_constraint_mode == 'hard':
+            # 硬约束模式：不在corridor内 = 碰撞
+            if self.corridor_data and not self._is_in_any_corridor(self.robot_position):
+                if self.current_step <= 1:
+                    print(f"  [碰撞] Corridor约束! 位置: ({self.robot_position[0]:.2f}, {self.robot_position[1]:.2f})")
+                return True
         
         return False
     
@@ -891,8 +1160,14 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         
         return score
     
-    def _compute_base_reward(self, action: np.ndarray, collision: bool) -> float:
-        """计算基础奖励（改进版本）"""
+    def _compute_base_reward(self, action: np.ndarray, collision: bool) -> Tuple[float, Dict]:
+        """
+        计算基础奖励（改进版本）
+        
+        Returns:
+            total_reward: 总奖励值
+            reward_components: 奖励分量字典（用于日志和调试）
+        """
         # 当前到目标的距离
         current_distance = np.linalg.norm(self.goal_pos - self.robot_position)
         
@@ -900,66 +1175,124 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         if not hasattr(self, 'last_distance'):
             self.last_distance = np.linalg.norm(self.goal_pos - self.start_pos)
         
-        # 进展奖励：向目标靠近得正奖励，远离得负奖励
+        # 进展奖励：向目标靠近得正奖励，远离得负奖励（可配置权重）
         progress = self.last_distance - current_distance
-        progress_reward = progress * 10.0  # 放大进展的影响
+        progress_reward = progress * self.progress_reward_weight  # 默认20.0
         
         # 更新距离记录
         self.last_distance = current_distance
         
         # 到达目标的大奖励
         goal_reached_reward = 0.0
-        if current_distance < 0.5:
+        if current_distance < 1.0:  # 放宽到达阈值（速度更快了）
             goal_reached_reward = 100.0  # 大幅增加到达奖励
         
-        # 碰撞惩罚
-        collision_penalty = -50.0 if collision else 0.0
+        # 碰撞惩罚（增加到-100以强调安全重要性）
+        collision_penalty = -100.0 if collision else 0.0
         
-        # 小的步数惩罚（鼓励快速完成）
-        step_penalty = -0.001  # 从-0.01降低到-0.001，避免压过GDE信号
-        
-        # 距离惩罚（轻微，避免停滞）
-        distance_penalty = -current_distance * 0.001  # 从0.01降低到0.001
+        # 步数惩罚（可配置权重）
+        step_penalty = -self.step_penalty_weight  # 默认-0.01
         
         # ========== GDE评估（路径质量）==========
         direction_reward = 0.0
+        direction_score_raw = 0.0
         curvature_reward = 0.0
+        curvature_score_raw = 0.0
         
         if hasattr(self, 'current_planned_path'):
-            # 1. 方向一致性GDE（朝向目标）
+            # 1. 方向一致性GDE（朝向目标，修改为对称奖励）
             try:
                 path_tensor = torch.from_numpy(self.current_planned_path).float()
                 reference_line = torch.from_numpy(self.goal_pos - self.robot_position).float()
                 
-                direction_score = self.gde(path_tensor, reference_line).item()
-                # direction_score ∈ [0, 1]，权重0.3
-                direction_reward = direction_score * 0.3
+                direction_score_raw = self.gde(path_tensor, reference_line).item()
+                # direction_score ∈ [0, 1]，归一化到[-1, 1]
+                direction_normalized = 2.0 * direction_score_raw - 1.0
+                # 权重0.3，范围[-0.3, 0.3]
+                direction_reward = direction_normalized * 0.3
             except Exception as e:
                 # 如果评估失败，不加分也不扣分
                 direction_reward = 0.0
             
             # 2. 路径平滑度GDE（曲率评估）
             try:
-                curvature_score = self._evaluate_path_curvature(self.current_planned_path)
+                curvature_score_raw = self._evaluate_path_curvature(self.current_planned_path)
                 # curvature_score ∈ (0, 1]，转换到[-1, 1]再加权
                 # score=1.0 → +0.5, score=0.5 → 0, score=0 → -0.5
-                normalized_curvature = 2.0 * curvature_score - 1.0
+                normalized_curvature = 2.0 * curvature_score_raw - 1.0
                 curvature_reward = normalized_curvature * 0.5
             except Exception as e:
                 curvature_reward = 0.0
         
+        # ========== Corridor约束惩罚 ==========
+        corridor_penalty = 0.0
+        corridor_violation_distance = 0.0
+        in_corridor = True
+        
+        # 性能优化：权重为0时跳过检查
+        if self.corridor_data and self.corridor_penalty_weight > 0:  
+            in_corridor = self._is_in_any_corridor(self.robot_position)
+            
+            if not in_corridor:
+                # 计算到最近corridor的距离
+                corridor_violation_distance = self._distance_to_nearest_corridor(self.robot_position)
+                
+                # 更新连续违规计数（用于提前终止）
+                # 只有当距离>1.0且真正严重违规时才计数
+                if corridor_violation_distance > 1.0:
+                    self.consecutive_violations += 1
+                else:
+                    self.consecutive_violations = 0  # 轻微违规不算
+                
+                # 根据约束模式计算惩罚
+                if self.corridor_constraint_mode == 'soft':
+                    # 软约束：轻微惩罚
+                    raw_penalty = -corridor_violation_distance * self.corridor_penalty_weight
+                elif self.corridor_constraint_mode == 'medium':
+                    # 中等约束：更大惩罚
+                    raw_penalty = -corridor_violation_distance * (self.corridor_penalty_weight * 2.0)
+                elif self.corridor_constraint_mode == 'hard':
+                    # 硬约束：在_check_collision中处理，这里不加惩罚
+                    raw_penalty = 0.0
+                else:
+                    raw_penalty = -corridor_violation_distance * self.corridor_penalty_weight
+                
+                # 裁剪惩罚：防止单步惩罚过大，保持主导但不失控
+                corridor_penalty = max(raw_penalty, -self.corridor_penalty_cap)
+            else:
+                # 在corridor内，重置连续违规计数
+                self.consecutive_violations = 0
+        
         # ========== 总奖励 ==========
         total_reward = (
             progress_reward +       # 主导：~10.0 per meter
-            direction_reward +      # 方向一致性：0~0.3
+            direction_reward +      # 方向一致性：-0.3~0.3 (对称)
             curvature_reward +      # 路径平滑度：-0.5~0.5
+            corridor_penalty +      # 新增：Corridor约束：0 或 -10~-50
             goal_reached_reward +   # 稀疏：100.0
-            collision_penalty +     # 稀疏：-50.0
-            step_penalty +          # 极小：-0.001
-            distance_penalty        # 极小：~-0.01
+            collision_penalty +     # 稀疏：-100.0 (增加)
+            step_penalty            # -0.01 (增加)
         )
+        # 注：删除了distance_penalty（与progress_reward冗余）
         
-        return total_reward
+        # 构建详细的奖励分量信息
+        reward_components = {
+            'progress_reward': progress_reward,
+            'progress_meters': progress,
+            'direction_reward': direction_reward,
+            'direction_score': direction_score_raw,
+            'curvature_reward': curvature_reward,
+            'curvature_score': curvature_score_raw,
+            'corridor_penalty': corridor_penalty,
+            'corridor_violation_distance': corridor_violation_distance,
+            'in_corridor': in_corridor,
+            'goal_reached_reward': goal_reached_reward,
+            'collision_penalty': collision_penalty,
+            'step_penalty': step_penalty,
+            'current_distance': current_distance
+        }
+        
+        return total_reward, reward_components
 
 
 # ==================== 内置测试 ====================

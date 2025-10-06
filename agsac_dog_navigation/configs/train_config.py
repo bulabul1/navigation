@@ -26,6 +26,16 @@ class EnvironmentConfig:
     curriculum_learning: bool = False
     scenario_seed: Optional[int] = None
     
+    # Corridor约束配置
+    corridor_constraint_mode: str = 'soft'  # 'soft', 'medium', 'hard'
+    
+    # 奖励函数微调参数
+    corridor_penalty_weight: float = 10.0
+    corridor_penalty_cap: float = 30.0
+    progress_reward_weight: float = 20.0
+    step_penalty_weight: float = 0.01
+    enable_step_limit: bool = True
+    
     # 设备
     device: str = 'cpu'
 
@@ -36,6 +46,8 @@ class ModelConfig:
     action_dim: int = 22  # 11个路径点
     hidden_dim: int = 128
     num_modes: int = 3  # 多模态轨迹预测数量
+    # SAC 熵策略
+    auto_entropy: bool = True
     
     # 与环境一致的配置（会自动同步）
     max_pedestrians: int = 10
@@ -68,6 +80,7 @@ class TrainingConfig:
     # 学习率
     actor_lr: float = 3e-4
     critic_lr: float = 3e-4
+    encoder_lr: Optional[float] = None  # 编码器学习率，None则使用critic_lr
     
     # SAC参数
     gamma: float = 0.99

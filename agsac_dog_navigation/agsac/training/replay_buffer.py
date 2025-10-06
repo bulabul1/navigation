@@ -81,6 +81,7 @@ class SequenceReplayBuffer:
         
         # 转换为tensor（如果还不是）
         processed_episode = {
+            'observations': episode_data.get('observations', []),  # 新增：原始观测（存CPU，节省GPU内存）
             'fused_states': [
                 s.to(self.device) if isinstance(s, torch.Tensor) else torch.tensor(s, device=self.device)
                 for s in episode_data['fused_states']
@@ -159,9 +160,11 @@ class SequenceReplayBuffer:
             
             # 4. 提取segment
             segment = {
+                'observations': episode['observations'][start_idx:end_idx] if 'observations' in episode else [],  # 新增
+                'next_observations': episode['observations'][start_idx+1:end_idx+1] if 'observations' in episode else [],  # 新增
                 'states': torch.stack(
                     episode['fused_states'][start_idx:end_idx]
-                ),  # (seq_len, 64)
+                ),  # (seq_len, 64) - 保留兼容
                 
                 'actions': torch.stack(
                     episode['actions'][start_idx:end_idx]
@@ -175,7 +178,7 @@ class SequenceReplayBuffer:
                 
                 'next_states': torch.stack(
                     episode['fused_states'][start_idx+1:end_idx+1]
-                ),  # (seq_len, 64)
+                ),  # (seq_len, 64) - 保留兼容
                 
                 'dones': torch.tensor(
                     episode['dones'][start_idx:end_idx],

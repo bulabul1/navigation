@@ -15,6 +15,14 @@ env:
   use_corridor_generator: true
   curriculum_learning: true
   scenario_seed: null
+  
+  # 奖励函数微调参数（默认值）
+  corridor_penalty_weight: 10.0
+  corridor_penalty_cap: 30.0
+  progress_reward_weight: 20.0
+  step_penalty_weight: 0.01
+  enable_step_limit: true
+  
   device: cuda
 
 model:
