@@ -127,7 +127,13 @@ class AGSACTrainer:
             'actor_losses': [],
             'critic_losses': [],
             'alpha_losses': [],
-            'alpha_values': []
+            'alpha_values': [],
+            # 新增：Episode详细信息
+            'done_reasons': [],           # 终止原因: 'collision', 'goal_reached', 'max_steps'
+            'collision_types': [],        # 碰撞类型: 'pedestrian', 'corridor', 'boundary', 'none'
+            'corridor_violations': [],    # Corridor违规次数
+            'avg_progress_reward': [],    # 平均progress奖励
+            'avg_corridor_penalty': []    # 平均corridor惩罚
         }
         
         # 最佳模型追踪
@@ -276,7 +282,7 @@ class AGSACTrainer:
             dones.append(done)
             hidden_states_list.append(self._copy_hidden_states(hidden_states))
             
-            # 收集奖励详情
+            # 收集奖励详情（新增collision_type）
             reward_infos.append({
                 'progress_reward': info.get('progress_reward', 0.0),
                 'direction_reward': info.get('direction_reward', 0.0),
@@ -286,6 +292,7 @@ class AGSACTrainer:
                 'in_corridor': info.get('in_corridor', True),
                 'goal_reached_reward': info.get('goal_reached_reward', 0.0),
                 'collision_penalty': info.get('collision_penalty', 0.0),
+                'collision_type': info.get('collision_type', 'none'),  # 新增：碰撞类型
                 'step_penalty': info.get('step_penalty', 0.0),
             })
             
@@ -955,12 +962,33 @@ class AGSACTrainer:
             log_str += f" | Time={episode_time:.2f}s"
             print(log_str)
             
-            # 第二行：路径详情
+
+            # 第二行：路径详情（新增碰撞类型统计）
             path_str = f"  ├─ Start: ({start_pos[0]:5.2f},{start_pos[1]:5.2f})"
             path_str += f" → Goal: ({goal_pos[0]:5.2f},{goal_pos[1]:5.2f})"
             path_str += f" | Dist: {path_distance:5.2f}m (直线:{straight_distance:.2f}m)"
             path_str += f" | 剩余: {final_distance:4.2f}m"
             path_str += f" | {done_reason}"
+            
+            # 如果是碰撞结束，显示碰撞类型
+            if done_reason == 'collision' and 'reward_infos' in episode_data:
+                collision_types = [info.get('collision_type', 'none') for info in episode_data['reward_infos']]
+                # 找到最后一个非'none'的碰撞类型
+                final_collision_type = 'none'
+                for ct in reversed(collision_types):
+                    if ct != 'none':
+                        final_collision_type = ct
+                        break
+                
+                # 映射碰撞类型为中文
+                collision_type_map = {
+                    'pedestrian': '行人碰撞',
+                    'corridor': 'corridor碰撞',
+                    'boundary': '边界碰撞',
+                    'none': '未知'
+                }
+                path_str += f" [{collision_type_map.get(final_collision_type, final_collision_type)}]"
+            
             print(path_str)
             
             # 第三行：奖励分量详情（新增）
@@ -1003,6 +1031,38 @@ class AGSACTrainer:
                 if len(sample_indices) > 10:
                     path_points_str += "..."
                 print(path_points_str)
+            
+            # 收集详细数据到train_history（新增）
+            self.train_history['done_reasons'].append(done_reason)
+            
+            # 提取碰撞类型
+            final_collision_type = 'none'
+            if done_reason == 'collision' and 'reward_infos' in episode_data:
+                collision_types = [info.get('collision_type', 'none') for info in episode_data['reward_infos']]
+                for ct in reversed(collision_types):
+                    if ct != 'none':
+                        final_collision_type = ct
+                        break
+            self.train_history['collision_types'].append(final_collision_type)
+            
+            # 提取corridor违规和奖励分量
+            if 'reward_infos' in episode_data:
+                avg_rewards = self._compute_average_reward_components(episode_data)
+                if avg_rewards:
+                    self.train_history['corridor_violations'].append(int(avg_rewards['corridor_violations']))
+                    self.train_history['avg_progress_reward'].append(avg_rewards['progress'])
+                    self.train_history['avg_corridor_penalty'].append(avg_rewards['corridor'])
+                else:
+                    # 没有reward_infos时填充默认值
+                    self.train_history['corridor_violations'].append(0)
+                    self.train_history['avg_progress_reward'].append(0.0)
+                    self.train_history['avg_corridor_penalty'].append(0.0)
+            else:
+                # 没有reward_infos时填充默认值
+                self.train_history['corridor_violations'].append(0)
+                self.train_history['avg_progress_reward'].append(0.0)
+                self.train_history['avg_corridor_penalty'].append(0.0)
+                
         else:
             # 旧版本兼容：只显示基础信息
             log_str = f"[Episode {episode:4d}]"
@@ -1017,6 +1077,13 @@ class AGSACTrainer:
             
             log_str += f" | Time={episode_time:.2f}s"
             print(log_str)
+            
+            # 旧版本兼容：填充默认值
+            self.train_history['done_reasons'].append('unknown')
+            self.train_history['collision_types'].append('none')
+            self.train_history['corridor_violations'].append(0)
+            self.train_history['avg_progress_reward'].append(0.0)
+            self.train_history['avg_corridor_penalty'].append(0.0)
         
         # TensorBoard记录
         if self.use_tensorboard and self.writer is not None:
@@ -1111,6 +1178,15 @@ class AGSACTrainer:
         self.best_eval_return = checkpoint['best_eval_return']
         self.train_history = checkpoint['train_history']
         
+        # 兼容性修复：为旧checkpoint添加新字段（如果缺失）
+        if 'done_reasons' not in self.train_history:
+            print("[Load] 检测到旧版checkpoint，添加新字段...")
+            self.train_history['done_reasons'] = []
+            self.train_history['collision_types'] = []
+            self.train_history['corridor_violations'] = []
+            self.train_history['avg_progress_reward'] = []
+            self.train_history['avg_corridor_penalty'] = []
+        
         # 同步episode_count到环境（确保resume训练时课程学习正确）
         if hasattr(self.env, 'episode_count'):
             self.env.episode_count = self.episode_count
@@ -1128,7 +1204,16 @@ class AGSACTrainer:
         # 转换为可序列化格式
         history_serializable = {}
         for key, values in self.train_history.items():
-            history_serializable[key] = [float(v) for v in values]
+            # 区分数值类型和字符串类型
+            if key in ['done_reasons', 'collision_types']:
+                # 字符串类型，直接保存
+                history_serializable[key] = values
+            elif key == 'corridor_violations':
+                # 整数类型
+                history_serializable[key] = [int(v) for v in values]
+            else:
+                # 浮点数类型
+                history_serializable[key] = [float(v) for v in values]
         
         with open(filepath, 'w') as f:
             json.dump(history_serializable, f, indent=2)

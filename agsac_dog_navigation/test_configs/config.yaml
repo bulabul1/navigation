@@ -1,0 +1,43 @@
+device: cpu
+env:
+  curriculum_learning: true
+  device: cpu
+  max_corridors: 10
+  max_episode_steps: 200
+  max_pedestrians: 10
+  max_vertices: 20
+  obs_horizon: 8
+  pred_horizon: 12
+  scenario_seed: null
+  use_corridor_generator: true
+  use_geometric_reward: true
+mode: curriculum
+model:
+  action_dim: 22
+  device: cpu
+  hidden_dim: 128
+  max_corridors: 10
+  max_pedestrians: 10
+  max_vertices: 20
+  obs_horizon: 8
+  pred_horizon: 12
+  pretrained_weights_path: null
+  use_pretrained_predictor: false
+seed: null
+training:
+  actor_lr: 0.0003
+  alpha: 0.2
+  batch_size: 16
+  buffer_capacity: 10000
+  critic_lr: 0.0003
+  episodes: 300
+  eval_interval: 50
+  experiment_name: agsac_training
+  gamma: 0.99
+  log_interval: 10
+  save_interval: 50
+  seq_len: 16
+  tau: 0.005
+  updates_per_episode: 10
+  use_tensorboard: true
+  warmup_episodes: 30

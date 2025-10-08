@@ -56,17 +56,17 @@ class CorridorGenerator:
         """
         # 1. 确定难度参数
         if difficulty == 'easy':
-            num_corridors = self.rng.randint(2, 5)  # 2-4个走廊
+            num_corridors = self.rng.randint(2, 4)  # 2-3个走廊（提供多路径选择）
             num_obstacles = 0  # 取消障碍物
             num_pedestrians = self.rng.randint(2, 4)  # 2-3个行人
         elif difficulty == 'medium':
-            num_corridors = self.rng.randint(2, 4)
+            num_corridors = self.rng.randint(3, 5)  # 3-4个走廊
             num_obstacles = 0  # 取消障碍物
-            num_pedestrians = self.rng.randint(2, 4)  # 2-3个行人
+            num_pedestrians = self.rng.randint(3, 5)  # 3-4个行人
         else:  # hard
-            num_corridors = self.rng.randint(3, 5)
+            num_corridors = self.rng.randint(3, 5)  # 3-4个走廊
             num_obstacles = 0  # 取消障碍物
-            num_pedestrians = self.rng.randint(2, 4)  # 2-3个行人
+            num_pedestrians = self.rng.randint(3, 5)  # 3-4个行人
         
         # 2. 生成起点和终点
         if fixed_start is not None:
@@ -220,19 +220,19 @@ class CorridorGenerator:
         """根据策略生成单条corridor"""
         
         if strategy == 'upper':
-            return self._upper_detour_corridor(start, goal, obstacles, width=1.5)
-        
-        elif strategy == 'lower':
-            return self._lower_detour_corridor(start, goal, obstacles, width=1.5)
-        
-        elif strategy == 'wide_upper':
             return self._upper_detour_corridor(start, goal, obstacles, width=2.5)
         
-        elif strategy == 'wide_lower':
+        elif strategy == 'lower':
             return self._lower_detour_corridor(start, goal, obstacles, width=2.5)
         
+        elif strategy == 'wide_upper':
+            return self._upper_detour_corridor(start, goal, obstacles, width=3.0)
+        
+        elif strategy == 'wide_lower':
+            return self._lower_detour_corridor(start, goal, obstacles, width=3.0)
+        
         elif strategy == 'direct':
-            return self._generate_direct_corridor(start, goal)
+            return self._generate_direct_corridor(start, goal, width=2.5)
         
         return None
     
@@ -241,36 +241,56 @@ class CorridorGenerator:
         start: np.ndarray,
         goal: np.ndarray,
         obstacles: List[np.ndarray],
-        width: float = 1.5
+        width: float = 2.5
     ) -> np.ndarray:
-        """上方绕行corridor"""
+        """
+        上方绕行corridor（修复版：确保无自相交）
         
-        # 找到障碍物的最高点
+        路径：起点 → 向上走 → 转弯向goal方向 → 向下到达终点
+        
+        生成一个"凹"字形或"┐"形的通道，确保：
+        1. 起点和终点在通道内部
+        2. 多边形不自相交
+        3. 形成连续的可行走路径
+        """
+        
+        # 找到障碍物的最高点（如果有障碍物）
         if obstacles:
             max_y = max(obs[:, 1].max() for obs in obstacles)
+            detour_y = max_y + width + self.rng.uniform(1.0, 2.0)
         else:
+            # 无障碍物时，向上绕行一段距离
             max_y = max(start[1], goal[1])
+            detour_y = max_y + self.rng.uniform(2.0, 3.0)
         
-        detour_y = max_y + width + self.rng.uniform(0.5, 1.0)
+        half_width = width / 2
         
-        # 构建L型多边形（扩展起点和终点区域，确保它们在内部）
-        # 从起点出发，向上绕，再到终点
-        mid_x = (start[0] + goal[0]) / 2
-        margin = 0.6  # 增加边距，确保起点终点在内部
+        # 确定起点和终点的相对位置
+        # 统一处理：从左到右（如果start在右侧，交换）
+        if start[0] > goal[0]:
+            left_point = goal
+            right_point = start
+            left_y_offset = -1.0  # goal下方
+            right_y_offset = -1.0  # start下方
+        else:
+            left_point = start
+            right_point = goal
+            left_y_offset = -1.0
+            right_y_offset = -1.0
         
+        # 构建L型凹多边形（逆时针绘制，确保无自相交）
+        # 形状类似"┐"或"┌"
         corridor = np.array([
-            [start[0] - margin, start[1] - margin],  # 起点区域（扩展）
-            [start[0] - margin, detour_y + width],  # 向上
-            [mid_x - 1, detour_y + width],       # 向右
-            [mid_x + 1, detour_y + width],
-            [goal[0] + margin, detour_y + width],   # 到达终点上方
-            [goal[0] + margin, goal[1] + margin],      # 向下到终点（扩展）
-            [goal[0] + margin, start[1] - margin],     # 回到起点高度
-            [mid_x + 1, start[1] - margin],
-            [mid_x + 1, detour_y],               # 内边界
-            [mid_x - 1, detour_y],
-            [mid_x - 1, start[1] - margin],
-            [start[0] - margin, start[1] - margin]
+            # 外边界（逆时针）
+            [left_point[0] - half_width, left_point[1] + left_y_offset],      # 1. 左侧起点
+            [left_point[0] - half_width, detour_y + half_width],               # 2. 向上
+            [right_point[0] + half_width, detour_y + half_width],              # 3. 向右
+            [right_point[0] + half_width, right_point[1] + right_y_offset],    # 4. 向下
+            # 内边界（从右向左，形成内凹）
+            [right_point[0] - half_width, right_point[1] + right_y_offset],    # 5. 右侧内边
+            [right_point[0] - half_width, detour_y - half_width],              # 6. 向上（内侧）
+            [left_point[0] + half_width, detour_y - half_width],               # 7. 向左（内侧）
+            [left_point[0] + half_width, left_point[1] + left_y_offset],       # 8. 向下回左侧
         ])
         
         return corridor
@@ -280,36 +300,58 @@ class CorridorGenerator:
         start: np.ndarray,
         goal: np.ndarray,
         obstacles: List[np.ndarray],
-        width: float = 1.5
+        width: float = 2.5
     ) -> np.ndarray:
-        """下方绕行corridor"""
+        """
+        下方绕行corridor（修复版：确保无自相交）
+        
+        路径：起点 → 向下走 → 转弯向goal方向 → 向上到达终点
+        
+        生成一个"凹"字形或"┘"形的通道，确保：
+        1. 起点和终点在通道内部
+        2. 多边形不自相交
+        3. 形成连续的可行走路径
+        """
         
         # 找到障碍物的最低点
         if obstacles:
             min_y = min(obs[:, 1].min() for obs in obstacles)
+            detour_y = min_y - width - self.rng.uniform(1.0, 2.0)
         else:
+            # 无障碍物时，向下绕行一段距离
             min_y = min(start[1], goal[1])
+            detour_y = min_y - self.rng.uniform(2.0, 3.0)
         
-        detour_y = min_y - width - self.rng.uniform(0.5, 1.0)
-        detour_y = max(0, detour_y)  # 不超出地图
+        detour_y = max(0.5, detour_y)  # 不超出地图边界（至少留0.5米）
         
-        # 构建L型多边形（扩展起点和终点区域，确保它们在内部）
-        mid_x = (start[0] + goal[0]) / 2
-        margin = 0.6  # 增加边距，确保起点终点在内部
+        half_width = width / 2
         
+        # 确定起点和终点的相对位置
+        # 统一处理：从左到右（如果start在右侧，交换）
+        if start[0] > goal[0]:
+            left_point = goal
+            right_point = start
+            left_y_offset = 1.0  # goal上方
+            right_y_offset = 1.0  # start上方
+        else:
+            left_point = start
+            right_point = goal
+            left_y_offset = 1.0
+            right_y_offset = 1.0
+        
+        # 构建L型凹多边形（逆时针绘制，确保无自相交）
+        # 形状类似"┘"或"└"
         corridor = np.array([
-            [start[0] - margin, start[1] + margin],  # 起点区域（扩展）
-            [start[0] - margin, detour_y - width],  # 向下
-            [mid_x - 1, detour_y - width],
-            [mid_x + 1, detour_y - width],
-            [goal[0] + margin, detour_y - width],   # 到达终点下方
-            [goal[0] + margin, goal[1] - margin],      # 向上到终点（扩展）
-            [goal[0] + margin, start[1] + margin],
-            [mid_x + 1, start[1] + margin],
-            [mid_x + 1, detour_y],               # 内边界
-            [mid_x - 1, detour_y],
-            [mid_x - 1, start[1] + margin],
-            [start[0] - margin, start[1] + margin]
+            # 外边界（逆时针）
+            [left_point[0] - half_width, left_point[1] + left_y_offset],      # 1. 左侧起点
+            [left_point[0] - half_width, detour_y - half_width],               # 2. 向下
+            [right_point[0] + half_width, detour_y - half_width],              # 3. 向右
+            [right_point[0] + half_width, right_point[1] + right_y_offset],    # 4. 向上
+            # 内边界（从右向左，形成内凹）
+            [right_point[0] - half_width, right_point[1] + right_y_offset],    # 5. 右侧内边
+            [right_point[0] - half_width, detour_y + half_width],              # 6. 向下（内侧）
+            [left_point[0] + half_width, detour_y + half_width],               # 7. 向左（内侧）
+            [left_point[0] + half_width, left_point[1] + left_y_offset],       # 8. 向上回左侧
         ])
         
         return corridor
@@ -318,18 +360,28 @@ class CorridorGenerator:
         self,
         start: np.ndarray,
         goal: np.ndarray,
-        width: float = 2.0
+        width: float = 2.5
     ) -> np.ndarray:
-        """直线corridor（矩形）"""
+        """
+        直线corridor（矩形）
+        
+        Args:
+            start: 起点
+            goal: 终点
+            width: 通道宽度（默认2.5米，足够机器狗+行人通行）
+        """
         
         direction = goal - start
-        direction_normalized = direction / (np.linalg.norm(direction) + 1e-6)
+        distance = np.linalg.norm(direction)
+        direction_normalized = direction / (distance + 1e-6)
+        
+        # 垂直于方向的向量（通道宽度）
         perpendicular = np.array([-direction[1], direction[0]])
         perpendicular = perpendicular / (np.linalg.norm(perpendicular) + 1e-6)
         perpendicular *= width / 2
         
-        # 向前后各延伸0.5米，确保起点和终点在corridor内部
-        extension = 0.5
+        # 向前后各延伸1米，确保起点和终点在corridor内部（增加到1米）
+        extension = 1.0
         start_extended = start - direction_normalized * extension
         goal_extended = goal + direction_normalized * extension
         
@@ -350,7 +402,9 @@ class CorridorGenerator:
     ) -> np.ndarray:
         """
         确保起点和终点在corridor内部
-        如果不在，扩展corridor包含它们
+        
+        注意：新版本的corridor生成逻辑已经在构建时确保了起点终点在内部，
+        这个函数只做验证，不再进行扩展（避免将L型拍扁成矩形）。
         
         Args:
             corridor: (N, 2) 多边形顶点
@@ -358,35 +412,20 @@ class CorridorGenerator:
             goal: (2,) 终点
         
         Returns:
-            扩展后的corridor
+            原始corridor（不做修改）
         """
-        # 检查起点和终点是否在内部
+        # 检查起点和终点是否在内部（只做验证）
         start_inside = self._point_in_polygon(start, corridor)
         goal_inside = self._point_in_polygon(goal, corridor)
         
-        # 如果都在内部，直接返回
-        if start_inside and goal_inside:
-            return corridor
+        # 如果不在内部，打印警告但不修改（避免破坏L型结构）
+        if not start_inside:
+            print(f"  [警告] 起点 ({start[0]:.2f}, {start[1]:.2f}) 可能在corridor边界上")
+        if not goal_inside:
+            print(f"  [警告] 终点 ({goal[0]:.2f}, {goal[1]:.2f}) 可能在corridor边界上")
         
-        # 否则，扩展corridor边界框包含起点和终点
-        # 计算corridor的边界框
-        min_x, min_y = corridor[:, 0].min(), corridor[:, 1].min()
-        max_x, max_y = corridor[:, 0].max(), corridor[:, 1].max()
-        
-        # 扩展边界框包含起点和终点（留有余量）
-        margin = 0.8
-        min_x = min(min_x, start[0] - margin, goal[0] - margin)
-        max_x = max(max_x, start[0] + margin, goal[0] + margin)
-        min_y = min(min_y, start[1] - margin, goal[1] - margin)
-        max_y = max(max_y, start[1] + margin, goal[1] + margin)
-        
-        # 返回扩展的矩形corridor
-        return np.array([
-            [min_x, min_y],
-            [max_x, min_y],
-            [max_x, max_y],
-            [min_x, max_y]
-        ])
+        # 直接返回原始corridor，保留其形状（包括L型）
+        return corridor
     
     def _point_in_polygon(self, point: np.ndarray, polygon: np.ndarray) -> bool:
         """

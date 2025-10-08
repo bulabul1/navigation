@@ -197,8 +197,8 @@ class AGSACEnvironment(ABC):
         # 1. 执行动作
         raw_state = self._step_env(action)
         
-        # 2. 碰撞检测
-        collision = self._check_collision()
+        # 2. 碰撞检测（返回碰撞标志和类型）
+        collision, collision_type = self._check_collision()
         
         # 3. 计算奖励
         reward, reward_info = self._compute_reward(action, collision)
@@ -217,6 +217,7 @@ class AGSACEnvironment(ABC):
         # 7. 构建info
         info = {
             'collision': collision,
+            'collision_type': collision_type,  # 新增：碰撞类型
             'done_reason': done_reason,
             'episode_step': self.current_step,
             'episode_return': self.episode_return,
@@ -645,6 +646,7 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         """使用生成器动态生成场景（带课程学习）"""
         
         # 课程学习：根据episode数量调整难度和约束模式
+        # 注意：只有启用curriculum_learning时才动态调整，否则使用config中的固定设置
         if self.curriculum_learning:
             # 难度渐进
             if self.episode_count < 50:
@@ -671,6 +673,11 @@ class DummyAGSACEnvironment(AGSACEnvironment):
                 base_weight + increments * increment_per_100,
                 max_weight
             )
+        else:
+            # 禁用课程学习时：使用config中的固定设置，不做任何覆盖
+            # self.current_difficulty, self.corridor_constraint_mode, 
+            # self.corridor_penalty_weight 均保持__init__中设置的值
+            pass
         
         # 生成场景
         scenario = self.corridor_generator.generate_scenario(
@@ -1059,14 +1066,21 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         
         return np.linalg.norm(point - nearest_point)
     
-    def _check_collision(self) -> bool:
-        """碰撞检测（含corridor约束）"""
+    def _check_collision(self) -> Tuple[bool, str]:
+        """
+        碰撞检测（含corridor约束）
+        
+        Returns:
+            (is_collision, collision_type): 
+                - is_collision: bool, 是否发生碰撞
+                - collision_type: str, 碰撞类型 ('boundary', 'pedestrian', 'corridor', 'none')
+        """
         # 边界检测（更宽松的边界）
         if np.any(self.robot_position < -5.0) or np.any(self.robot_position > 15.0):
             # 诊断日志：边界碰撞
             if self.current_step <= 1:  # 仅第一步输出
                 print(f"  [碰撞] 边界碰撞! 位置: ({self.robot_position[0]:.2f}, {self.robot_position[1]:.2f})")
-            return True
+            return True, 'boundary'
         
         # 行人碰撞检测（简化：距离阈值）
         for i, ped in enumerate(self.pedestrian_trajectories):
@@ -1079,7 +1093,7 @@ class DummyAGSACEnvironment(AGSACEnvironment):
                         print(f"  [碰撞] 行人碰撞! 行人{i}距离: {dist:.3f}m < 0.2m")
                         print(f"       机器人: ({self.robot_position[0]:.2f}, {self.robot_position[1]:.2f})")
                         print(f"       行人{i}: ({ped_pos[0]:.2f}, {ped_pos[1]:.2f})")
-                    return True
+                    return True, 'pedestrian'
         
         # Corridor约束检测（课程学习）
         if hasattr(self, 'corridor_constraint_mode') and \
@@ -1088,9 +1102,9 @@ class DummyAGSACEnvironment(AGSACEnvironment):
             if self.corridor_data and not self._is_in_any_corridor(self.robot_position):
                 if self.current_step <= 1:
                     print(f"  [碰撞] Corridor约束! 位置: ({self.robot_position[0]:.2f}, {self.robot_position[1]:.2f})")
-                return True
+                return True, 'corridor'
         
-        return False
+        return False, 'none'
     
     def _evaluate_path_curvature(self, path: np.ndarray) -> float:
         """
@@ -1182,13 +1196,13 @@ class DummyAGSACEnvironment(AGSACEnvironment):
         # 更新距离记录
         self.last_distance = current_distance
         
-        # 到达目标的大奖励
+        # 到达目标的大奖励（温和校准：保持强激励）
         goal_reached_reward = 0.0
         if current_distance < 1.0:  # 放宽到达阈值（速度更快了）
-            goal_reached_reward = 100.0  # 大幅增加到达奖励
+            goal_reached_reward = 100.0  # 保持100（与-40 collision形成2.5倍正向激励）
         
-        # 碰撞惩罚（增加到-100以强调安全重要性）
-        collision_penalty = -100.0 if collision else 0.0
+        # 碰撞惩罚（温和校准：降低稀疏惩罚值）
+        collision_penalty = -40.0 if collision else 0.0  # 降压：-100.0 → -40.0
         
         # 步数惩罚（可配置权重）
         step_penalty = -self.step_penalty_weight  # 默认-0.01
@@ -1208,8 +1222,8 @@ class DummyAGSACEnvironment(AGSACEnvironment):
                 direction_score_raw = self.gde(path_tensor, reference_line).item()
                 # direction_score ∈ [0, 1]，归一化到[-1, 1]
                 direction_normalized = 2.0 * direction_score_raw - 1.0
-                # 权重0.3，范围[-0.3, 0.3]
-                direction_reward = direction_normalized * 0.3
+                # 温和提升GDE权重：0.3 → 0.5
+                direction_reward = direction_normalized * 0.5
             except Exception as e:
                 # 如果评估失败，不加分也不扣分
                 direction_reward = 0.0
@@ -1218,9 +1232,9 @@ class DummyAGSACEnvironment(AGSACEnvironment):
             try:
                 curvature_score_raw = self._evaluate_path_curvature(self.current_planned_path)
                 # curvature_score ∈ (0, 1]，转换到[-1, 1]再加权
-                # score=1.0 → +0.5, score=0.5 → 0, score=0 → -0.5
+                # 温和提升GDE权重：0.5 → 0.8
                 normalized_curvature = 2.0 * curvature_score_raw - 1.0
-                curvature_reward = normalized_curvature * 0.5
+                curvature_reward = normalized_curvature * 0.8
             except Exception as e:
                 curvature_reward = 0.0
         
@@ -1263,17 +1277,17 @@ class DummyAGSACEnvironment(AGSACEnvironment):
                 # 在corridor内，重置连续违规计数
                 self.consecutive_violations = 0
         
-        # ========== 总奖励 ==========
+        # ========== 总奖励（温和校准版）==========
         total_reward = (
-            progress_reward +       # 主导：~10.0 per meter
-            direction_reward +      # 方向一致性：-0.3~0.3 (对称)
-            curvature_reward +      # 路径平滑度：-0.5~0.5
-            corridor_penalty +      # 新增：Corridor约束：0 或 -10~-50
-            goal_reached_reward +   # 稀疏：100.0
-            collision_penalty +     # 稀疏：-100.0 (增加)
-            step_penalty            # -0.01 (增加)
+            progress_reward +       # 主导：~20.0 per meter（权重20.0）
+            direction_reward +      # 方向一致性：-0.5~0.5（权重0.5）
+            curvature_reward +      # 路径平滑度：-0.8~0.8（权重0.8）
+            corridor_penalty +      # Corridor约束：0 或 -4~-6（降压）
+            goal_reached_reward +   # 稀疏：+100.0（强激励，2.5x collision）
+            collision_penalty +     # 稀疏：-40.0（适度惩罚）
+            step_penalty            # -0.01
         )
-        # 注：删除了distance_penalty（与progress_reward冗余）
+        # 注：collision降压，goal保持高激励，形成健康的成功/失败对比
         
         # 构建详细的奖励分量信息
         reward_components = {

@@ -1,0 +1,52 @@
+# 方向多样性训练配置
+# 基于已有模型继续训练，增加全方向导航能力
+
+# 环境配置
+env:
+  use_corridor_generator: true
+  curriculum_learning: true
+  scenario_seed: 42
+  corridor_constraint_mode: 'soft'
+  corridor_penalty_weight: 10.0
+
+# 模型配置
+model:
+  device: 'cuda'
+  learning_rate: 3e-4
+  batch_size: 256
+  hidden_size: 256
+  num_layers: 2
+
+# 训练配置
+training:
+  max_episodes: 300  # 继续训练300个episodes
+  eval_interval: 50
+  save_interval: 50
+  log_interval: 10
+  
+  # 从已有模型开始训练
+  resume_from: 'logs/curriculum_training_20251004_124233/curriculum_training/best_model.pt'
+  
+  # 降低学习率，精细调优
+  learning_rate_decay: 0.95
+  min_learning_rate: 1e-5
+
+# 课程学习配置（增强版）
+curriculum:
+  # 阶段1：保持当前方向（适应新环境）
+  phase1_episodes: 50
+  phase1_direction_bias: 'right_up'  # 保持原有方向
+  
+  # 阶段2：增加方向多样性
+  phase2_episodes: 100
+  phase2_direction_bias: 'mixed'     # 混合方向
+  
+  # 阶段3：全方向训练
+  phase3_episodes: 150
+  phase3_direction_bias: 'full'      # 全方向
+
+# 日志配置
+logging:
+  log_dir: 'logs/directional_training'
+  tensorboard: true
+  console_log: true

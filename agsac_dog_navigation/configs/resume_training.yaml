@@ -1,0 +1,50 @@
+# 恢复训练配置 - 在新环境下继续训练旧模型
+# 适用于从旧checkpoint迁移到新环境配置
+
+mode: curriculum
+device: cuda  # 使用GPU加速
+seed: null
+
+env:
+  max_pedestrians: 10
+  max_corridors: 10
+  max_vertices: 20
+  obs_horizon: 8
+  pred_horizon: 12
+  max_episode_steps: 200
+  use_geometric_reward: true
+  use_corridor_generator: true
+  curriculum_learning: true
+  scenario_seed: null
+  device: cuda  # 使用GPU
+
+model:
+  action_dim: 22
+  hidden_dim: 128
+  num_modes: 3
+  max_pedestrians: 10
+  max_corridors: 10
+  max_vertices: 20
+  obs_horizon: 8
+  pred_horizon: 12
+  use_pretrained_predictor: true
+  pretrained_weights_path: "external/SocialCircle_original/weights/SocialCircle/evsczara1"
+  device: cuda
+
+training:
+  episodes: 500  # 增加到500（从300的checkpoint继续）
+  warmup_episodes: 0  # 不需要warmup，已经有经验
+  updates_per_episode: 10
+  buffer_capacity: 10000
+  seq_len: 16
+  batch_size: 16
+  actor_lr: 0.0001  # 降低学习率（从0.0003降至0.0001）
+  critic_lr: 0.0001  # 降低学习率，让模型缓慢适应
+  gamma: 0.99
+  tau: 0.005
+  alpha: 0.2
+  log_interval: 10
+  save_interval: 50
+  eval_interval: 50
+  use_tensorboard: true
+  experiment_name: resume_training_new_env

@@ -1,0 +1,59 @@
+# 恢复训练配置 - 快速版本（性能优化）
+# 禁用corridor约束检查以提升速度
+
+mode: curriculum
+device: cuda
+seed: null
+
+env:
+  max_pedestrians: 10
+  max_corridors: 10
+  max_vertices: 20
+  obs_horizon: 8
+  pred_horizon: 12
+  max_episode_steps: 200
+  use_geometric_reward: true
+  use_corridor_generator: true
+  curriculum_learning: true
+  scenario_seed: null
+  device: cuda
+  
+  # ===== 性能优化：禁用corridor检查 =====
+  corridor_penalty_weight: 0.0       # 禁用（提升速度约10倍）
+  corridor_penalty_cap: 30.0
+  
+  # ===== 微调参数 =====
+  progress_reward_weight: 15.0       # 降低激进性
+  step_penalty_weight: 0.02          # 增加时间压力
+  enable_step_limit: true            # 启用步长限幅
+
+model:
+  action_dim: 22
+  hidden_dim: 128
+  num_modes: 3
+  max_pedestrians: 10
+  max_corridors: 10
+  max_vertices: 20
+  obs_horizon: 8
+  pred_horizon: 12
+  use_pretrained_predictor: true
+  pretrained_weights_path: "external/SocialCircle_original/weights/SocialCircle/evsczara1"
+  device: cuda
+
+training:
+  episodes: 500
+  warmup_episodes: 0
+  updates_per_episode: 10
+  buffer_capacity: 10000
+  seq_len: 16
+  batch_size: 16
+  actor_lr: 0.0001
+  critic_lr: 0.0001
+  gamma: 0.99
+  tau: 0.005
+  alpha: 0.2
+  log_interval: 10              # 每10个episodes输出
+  save_interval: 50
+  eval_interval: 50
+  use_tensorboard: true
+  experiment_name: resume_training_fast
